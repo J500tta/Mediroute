@@ -20,7 +20,7 @@ const busy = m => { const b = $('#busy'); b.hidden = !m; b.textContent = m || ''
 const show = v => {
   document.querySelectorAll('main>section').forEach(s => s.hidden = s.id !== 'v-' + v);
   if (v === 'list') drawMap();
-  if (v === 'settings') { $('#sAddr').value = cfg.addr; $('#sPc').value = cfg.pc; }
+  if (v === 'settings') { $('#sAddr').value = cfg.addr; $('#sPc').value = cfg.pc; $('#bEx').textContent = 'Exact house lookup: ' + (cfg.exact === false ? 'OFF' : 'ON'); }
   window.scrollTo(0, 0);
 };
 const mins = s => s >= 3600 ? Math.floor(s / 3600) + ' h ' + Math.round(s % 3600 / 60) + ' min' : Math.round(s / 60) + ' min';
@@ -32,6 +32,18 @@ async function geoPc(pc) {
   if (!r.ok) throw new Error('Postcode "' + pc + '" was not found. Check it and try again.');
   const j = (await r.json()).result;
   return { lat: j.latitude, lng: j.longitude };
+}
+const distM = (a, b) => { const r = x => x * Math.PI / 180, h = Math.sin(r(b.lat - a.lat) / 2) ** 2 + Math.cos(r(a.lat)) * Math.cos(r(b.lat)) * Math.sin(r(b.lng - a.lng) / 2) ** 2; return 12742000 * Math.asin(Math.sqrt(h)); };
+// Finds the exact house on OpenStreetMap (Nominatim). Rejected if it lands >1.5 km from the postcode.
+async function geoExact(addr, pc, c) {
+  for (const q of [addr + ', ' + pc, addr + ', Loughborough, UK']) {
+    try {
+      const j = await (await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=gb&q=' + encodeURIComponent(q))).json();
+      if (j[0]) { const p = { lat: +j[0].lat, lng: +j[0].lon }; if (distM(p, c) < 1500) return p; }
+    } catch (e) {}
+    await new Promise(r => setTimeout(r, 1100));
+  }
+  return null;
 }
 async function ensurePharm() {
   if (!cfg.ll || cfg.llPc !== cfg.pc) { cfg.ll = await geoPc(cfg.pc); cfg.llPc = cfg.pc; save(); }
@@ -88,12 +100,25 @@ function loadTess() {
     document.head.appendChild(s);
   });
 }
-async function shrink(file) {
+// Enlarges, greys and (optionally) black-and-white thresholds the photo so text is crisper.
+async function prep(file, bw) {
   const bmp = await createImageBitmap(file);
-  const k = Math.min(1, 1800 / Math.max(bmp.width, bmp.height));
-  const c = document.createElement('canvas'); c.width = bmp.width * k; c.height = bmp.height * k;
-  const x = c.getContext('2d'); x.filter = 'grayscale(1) contrast(1.3)'; x.drawImage(bmp, 0, 0, c.width, c.height);
-  return c;
+  const k = Math.min(2, 2200 / Math.max(bmp.width, bmp.height));
+  const c = document.createElement('canvas'); c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+  const x = c.getContext('2d'); x.drawImage(bmp, 0, 0, c.width, c.height);
+  const im = x.getImageData(0, 0, c.width, c.height), d = im.data, h = new Array(256).fill(0);
+  for (let i = 0; i < d.length; i += 4) { const g = (d[i] * .3 + d[i + 1] * .59 + d[i + 2] * .11) | 0; d[i] = d[i + 1] = d[i + 2] = g; h[g]++; }
+  if (bw) { // Otsu threshold
+    const N = d.length / 4; let sum = 0, sB = 0, wB = 0, best = 0, th = 128;
+    for (let t = 0; t < 256; t++) sum += t * h[t];
+    for (let t = 0; t < 256; t++) {
+      wB += h[t]; if (!wB) continue; const wF = N - wB; if (!wF) break;
+      sB += t * h[t]; const mB = sB / wB, mF = (sum - sB) / wF, v = wB * wF * (mB - mF) ** 2;
+      if (v > best) { best = v; th = t; }
+    }
+    for (let i = 0; i < d.length; i += 4) d[i] = d[i + 1] = d[i + 2] = d[i] > th ? 255 : 0;
+  }
+  x.putImageData(im, 0, 0); return c;
 }
 $('#cam').onchange = async e => {
   const f = e.target.files[0]; e.target.value = '';
@@ -101,8 +126,14 @@ $('#cam').onchange = async e => {
   busy('Reading sticker on your phone…');
   try {
     await loadTess();
-    const { data } = await Tesseract.recognize(await shrink(f), 'eng');
-    const p = parseSticker(data.text);
+    const wk = await Tesseract.createWorker('eng');
+    await wk.setParameters({ tessedit_pageseg_mode: '6' });
+    let p = { name: '', addr: '', pc: '' };
+    for (const bw of [true, false]) { // try sharpened black-and-white first, then plain grey
+      p = parseSticker((await wk.recognize(await prep(f, bw))).data.text);
+      if (p.pc) break;
+    }
+    await wk.terminate();
     fillForm(p.name, p.addr, p.pc);
     $('#ocrMsg').textContent = p.pc ? 'Check the details below, fix anything wrong, then save.' : 'No postcode found. Type it in below, or retake the photo.';
   } catch (err) { fail(err); } finally { busy(0); }
@@ -114,8 +145,11 @@ $('#bSave').onclick = async () => {
   if (!pc) return alert('Enter a postcode.');
   busy('Checking postcode…');
   try {
-    const ll = await geoPc(pc);
-    day.items.push({ id: Date.now() + Math.random().toString(36).slice(2, 6), name, addr, pc, lat: ll.lat, lng: ll.lng, s: 'todo' });
+    const c = await geoPc(pc);
+    let ex = null;
+    if (addr && cfg.exact !== false) { busy('Finding the house…'); ex = await geoExact(addr, pc, c); }
+    const ll = ex || c;
+    day.items.push({ id: Date.now() + Math.random().toString(36).slice(2, 6), name, addr, pc, lat: ll.lat, lng: ll.lng, ex: !!ex, s: 'todo' });
     scanned++; save();
     $('#form').hidden = true; $('#scanCount').textContent = scanned + ' added this session. Scan the next bag.';
     $('#ocrMsg').textContent = 'Saved. Take the next photo.';
@@ -155,6 +189,9 @@ function render() {
   const it = day.items, d = it.filter(x => x.s === 'done').length, o = it.filter(x => x.s === 'todo').length;
   $('#nT').textContent = it.length; $('#nD').textContent = d; $('#nO').textContent = o;
   const ord = todoOrdered();
+  const nx = ord[0] || it.find(x => x.s === 'todo');
+  $('#next').hidden = !nx;
+  if (nx) $('#next').innerHTML = `<h3>${ord[0] ? 'Next stop' : 'Next'}: ${esc(nx.name)}</h3><p>${esc(nx.addr)}, ${esc(nx.pc)}</p><a class="btn teal" href="https://maps.apple.com/?daddr=${nx.lat},${nx.lng}&dirflg=d">NAVIGATE</a><div class="row"><button class="teal" data-a="done" data-id="${nx.id}">DELIVERED</button><button class="ghost" data-a="fail" data-id="${nx.id}">UNSUCCESSFUL</button></div>`;
   const rank = x => x.s === 'todo' ? (ord.includes(x) ? ord.indexOf(x) : 500) : 1000;
   const L2 = [...it].sort((a, b) => rank(a) - rank(b));
   $('#list').innerHTML = L2.length ? L2.map(x => {
@@ -162,10 +199,10 @@ function render() {
     const btns = x.s === 'todo'
       ? `<div class="row"><button class="sm teal" data-a="done" data-id="${x.id}">Delivered</button><button class="sm ghost" data-a="fail" data-id="${x.id}">Unsuccessful</button></div><div class="row"><a class="btn sm ghost" href="https://maps.apple.com/?daddr=${x.lat},${x.lng}&dirflg=d">Navigate</a><button class="sm ghost" data-a="del" data-id="${x.id}">Remove</button></div>`
       : `<div class="row"><button class="sm ghost" data-a="undo" data-id="${x.id}">Undo</button></div>`;
-    return `<div class="card ${x.s === 'todo' ? '' : 'done'}"><h3>${i >= 0 ? `<span class="n">${i + 1}</span>` : ''}${esc(x.name)}</h3><p>${esc(x.addr)}</p><p>${esc(x.pc)}</p>${chip}${btns}</div>`;
+    return `<div class="card ${x.s === 'todo' ? '' : 'done'}"><h3>${i >= 0 ? `<span class="n">${i + 1}</span>` : ''}${esc(x.name)}</h3><p>${esc(x.addr)}</p><p>${esc(x.pc)}</p>${x.ex ? '' : '<p class="note">Approximate location (postcode only)</p>'}${chip}${btns}</div>`;
   }).join('') : '<p class="note">No deliveries yet. Press Scan medication on the home screen.</p>';
 }
-$('#list').onclick = e => {
+$('#next').onclick = $('#list').onclick = e => {
   const b = e.target.closest('[data-a]'); if (!b) return;
   const x = day.items.find(i => i.id === b.dataset.id), a = b.dataset.a;
   if (a === 'done') x.s = 'done'; else if (a === 'fail') x.s = 'fail'; else if (a === 'undo') x.s = 'todo';
@@ -183,5 +220,8 @@ $('#bBack').onclick = backToPharmacy;
 $('#bCfg').onclick = () => { cfg.addr = $('#sAddr').value.trim(); cfg.pc = $('#sPc').value.trim().toUpperCase(); cfg.ll = null; save(); ensurePharm().then(() => alert('Pharmacy saved.')).catch(fail); };
 $('#bWipe').onclick = () => { if (confirm('Delete all deliveries from this phone?')) { day = { d: today(), items: [], order: [], plan: null }; save(); show('home'); } };
 
+$('#bEx').onclick = () => { cfg.exact = cfg.exact === false; save(); show('settings'); };
+const wake = async () => { try { if (navigator.wakeLock && document.visibilityState === 'visible') await navigator.wakeLock.request('screen'); } catch (e) {} };
+wake(); document.addEventListener('visibilitychange', wake); // keeps the screen on while you work
 render(); show('home');
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
