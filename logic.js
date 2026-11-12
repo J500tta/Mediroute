@@ -1,14 +1,33 @@
 // MediRoute logic: sticker text parsing and route ordering. No patient data is stored here.
 const PC_RE = /\b([A-Z]{1,2}\d[A-Z\d]?)\s*(\d[A-Z]{2})\b/i;
 
+// OCR mixes up look-alike characters (O/0, I/1, S/5...). This repairs them by position.
+const FIXD = { O: '0', Q: '0', D: '0', I: '1', L: '1', Z: '2', S: '5', B: '8', G: '6' };
+const FIXL = { '0': 'O', '1': 'I', '5': 'S', '8': 'B', '6': 'G', '2': 'Z' };
+function fixPostcode(raw) {
+  const t = raw.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (t.length < 5 || t.length > 7) return '';
+  const inw = t.slice(-3), o = t.slice(0, -3).split('');
+  o[0] = FIXL[o[0]] || o[0];
+  if (o.length === 2) o[1] = FIXD[o[1]] || o[1];
+  if (o.length === 4) { o[1] = FIXL[o[1]] || o[1]; o[2] = FIXD[o[2]] || o[2]; o[3] = FIXD[o[3]] || o[3]; }
+  const pc = o.join('') + ' ' + (FIXD[inw[0]] || inw[0]) + (FIXL[inw[1]] || inw[1]) + (FIXL[inw[2]] || inw[2]);
+  return PC_RE.test(pc) ? pc : '';
+}
+
 // Turns raw OCR text into {name, addr, pc}. Lines AFTER the postcode are ignored
 // (they usually hold medication info, which MediRoute never keeps).
 function parseSticker(text) {
   const lines = text.split('\n').map(s => s.replace(/[|_~]/g, ' ').replace(/\s+/g, ' ').trim()).filter(s => s.length > 1);
   let pc = '', pi = -1;
   lines.forEach((l, i) => {
-    const m = l.toUpperCase().match(PC_RE);
-    if (m && pi < 0) { pc = m[1] + ' ' + m[2]; pi = i; }
+    if (pi >= 0) return;
+    const u = l.toUpperCase();
+    let m = u.match(PC_RE);
+    if (m) { pc = m[1] + ' ' + m[2]; pi = i; return; }
+    m = u.replace(/[^A-Z0-9 ]/g, '').match(/([A-Z0-9]{2,4})\s?([A-Z0-9]{3})$/);
+    const f = m && fixPostcode(m[1] + m[2]);
+    if (f) { pc = f; pi = i; lines[i] = l.replace(/[A-Za-z0-9]{2,4}\s?[A-Za-z0-9]{3}[^A-Za-z0-9]*$/, ' ' + f); }
   });
   const head = pi >= 0 ? lines.slice(0, pi + 1) : lines.slice(0, 4);
   if (pi >= 0) head[pi] = head[pi].replace(PC_RE, '').replace(/[,\s]+$/, '').trim();
@@ -49,4 +68,4 @@ function optimise(D, n, closed) {
   }
   return r;
 }
-if (typeof module !== 'undefined') module.exports = { parseSticker, optimise };
+if (typeof module !== 'undefined') module.exports = { parseSticker, optimise, fixPostcode };

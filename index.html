@@ -37,7 +37,7 @@ label{font-size:14px;color:var(--mute)}
 .pin{width:28px;height:28px;border-radius:50%;color:#fff;font-weight:800;display:flex;align-items:center;justify-content:center;border:2px solid #fff;box-shadow:0 1px 4px #0006}
 .note{font-size:13px;color:var(--mute);margin:4px 0 12px}
 #busy{position:fixed;inset:0;background:#0B1F3Acc;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;text-align:center;padding:30px;z-index:9999}
-h2{margin:6px 0 12px}.next{background:var(--navy);color:#fff;border-radius:16px;padding:16px;margin-bottom:14px}.next h3{margin:0 0 2px;font-size:22px}.next p{margin:0 0 12px;color:#cfe0f0}.next .btn,.next button{margin-bottom:8px}
+h2{margin:6px 0 12px}.next{background:var(--navy);color:#fff;border-radius:16px;padding:16px;margin-bottom:14px}.next h3{margin:0 0 2px;font-size:22px}.next p{margin:0 0 12px;color:#cfe0f0}.next .btn,.next button{margin-bottom:8px}#order{border:2px solid var(--line);border-radius:16px;padding:12px 14px;margin-bottom:14px}#order summary{font-weight:700}.ol{display:flex;align-items:center;gap:6px;padding:8px 0;border-top:1px solid var(--line);margin-top:8px;font-size:15px}.n{flex-shrink:0}
 </style></head><body>
 <header>
   <h1>MEDIROUTE</h1><p>Today’s deliveries</p>
@@ -46,6 +46,7 @@ h2{margin:6px 0 12px}.next{background:var(--navy);color:#fff;border-radius:16px;
 <main>
 <section id="v-home">
   <div id="next" class="next" hidden></div>
+  <div id="order" hidden></div>
   <button class="teal" id="bScan">SCAN MEDICATION</button>
   <button class="teal" id="bAdd">ADD NEW DELIVERIES</button>
   <button id="bPlan">PLAN FASTEST ROUTE</button>
@@ -86,6 +87,7 @@ h2{margin:6px 0 12px}.next{background:var(--navy);color:#fff;border-radius:16px;
   <label>Pharmacy name and address</label><input id="sAddr">
   <label>Pharmacy postcode</label><input id="sPc" autocapitalize="characters">
   <button class="teal" id="bCfg">Save pharmacy</button>
+  <button class="ghost" id="bNav"></button>
   <button class="ghost" id="bEx"></button>
   <button class="warn" id="bWipe">Delete all of today’s deliveries now</button>
   <p class="note">Deliveries are kept only on this phone and are wiped automatically at the start of each new day. Photos and medication text are never saved. Exact house lookup sends the address text (not the name) to OpenStreetMap’s free Nominatim service; turn it off if that is not allowed, and MediRoute will use the postcode only.</p>

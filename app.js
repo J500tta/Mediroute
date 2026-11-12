@@ -1,6 +1,9 @@
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const today = () => new Date().toISOString().slice(0, 10);
+const navUrl = (to, from) => cfg.nav === 'apple'
+  ? `https://maps.apple.com/?${from ? `saddr=${from.lat},${from.lng}&` : ''}daddr=${to.lat},${to.lng}&dirflg=d`
+  : `https://waze.com/ul?ll=${to.lat},${to.lng}&navigate=yes`;
 const OSRM = 'https://router.project-osrm.org';
 
 // ---- Storage (this phone only). Deliveries are wiped each new day. ----
@@ -20,7 +23,7 @@ const busy = m => { const b = $('#busy'); b.hidden = !m; b.textContent = m || ''
 const show = v => {
   document.querySelectorAll('main>section').forEach(s => s.hidden = s.id !== 'v-' + v);
   if (v === 'list') drawMap();
-  if (v === 'settings') { $('#sAddr').value = cfg.addr; $('#sPc').value = cfg.pc; $('#bEx').textContent = 'Exact house lookup: ' + (cfg.exact === false ? 'OFF' : 'ON'); }
+  if (v === 'settings') { $('#sAddr').value = cfg.addr; $('#sPc').value = cfg.pc; $('#bNav').textContent = 'Navigation app: ' + (cfg.nav === 'apple' ? 'Apple Maps' : 'Waze'); $('#bEx').textContent = 'Exact house lookup: ' + (cfg.exact === false ? 'OFF' : 'ON'); }
   window.scrollTo(0, 0);
 };
 const mins = s => s >= 3600 ? Math.floor(s / 3600) + ' h ' + Math.round(s % 3600 / 60) + ' min' : Math.round(s / 60) + ' min';
@@ -87,7 +90,7 @@ async function backToPharmacy() {
   try {
     await ensurePharm();
     const p = await gps();
-    location.href = `https://maps.apple.com/?saddr=${p.lat},${p.lng}&daddr=${cfg.ll.lat},${cfg.ll.lng}&dirflg=d`;
+    location.href = navUrl(cfg.ll, p);
   } catch (e) { fail(e); } finally { busy(0); }
 }
 
@@ -180,7 +183,7 @@ function drawMap() {
   const line = L.geoJSON(p.geo, { style: { color: '#0FB5A6', weight: 5 } }).addTo(layer);
   const pin = (ll, t, c) => L.marker([ll.lat, ll.lng], { icon: L.divIcon({ className: '', html: `<div class="pin" style="background:${c}">${t}</div>`, iconSize: [28, 28] }) }).addTo(layer);
   pin(p.start, p.closed ? 'P' : '●', '#0B1F3A');
-  todoOrdered().forEach((x, i) => pin(x, i + 1, '#0FB5A6'));
+  todoOrdered().forEach(x => pin(x, day.order.indexOf(x.id) + 1, '#0FB5A6'));
   $('#sum').textContent = `${mins(p.dur)} · ${km(p.dist)} · ${todoOrdered().length} stops left` + (p.closed ? ' · returns to pharmacy' : ' · ends at last stop');
   setTimeout(() => { map.invalidateSize(); map.fitBounds(line.getBounds(), { padding: [20, 20] }); }, 60);
 }
@@ -190,16 +193,19 @@ function render() {
   $('#nT').textContent = it.length; $('#nD').textContent = d; $('#nO').textContent = o;
   const ord = todoOrdered();
   const nx = ord[0] || it.find(x => x.s === 'todo');
+  const num = x => day.order.indexOf(x.id) + 1;
+  $('#order').hidden = !ord.length;
+  $('#order').innerHTML = ord.length ? `<details open><summary>Route order: ${ord.length} stops left</summary><p class="note">Write these numbers on the bags. They stay the same until you plan again.</p>${ord.map(x => `<div class="ol"><span class="n">${num(x)}</span><div><b>${esc(x.name)}</b><br>${esc(x.addr)}, ${esc(x.pc)}</div></div>`).join('')}</details>` : '';
   $('#next').hidden = !nx;
-  if (nx) $('#next').innerHTML = `<h3>${ord[0] ? 'Next stop' : 'Next'}: ${esc(nx.name)}</h3><p>${esc(nx.addr)}, ${esc(nx.pc)}</p><a class="btn teal" href="https://maps.apple.com/?daddr=${nx.lat},${nx.lng}&dirflg=d">NAVIGATE</a><div class="row"><button class="teal" data-a="done" data-id="${nx.id}">DELIVERED</button><button class="ghost" data-a="fail" data-id="${nx.id}">UNSUCCESSFUL</button></div>`;
+  if (nx) $('#next').innerHTML = `<h3>${ord[0] ? 'Stop ' + num(nx) : 'Next'}: ${esc(nx.name)}</h3><p>${esc(nx.addr)}, ${esc(nx.pc)}</p><a class="btn teal" href="${navUrl(nx)}">NAVIGATE</a><div class="row"><button class="teal" data-a="done" data-id="${nx.id}">DELIVERED</button><button class="ghost" data-a="fail" data-id="${nx.id}">UNSUCCESSFUL</button></div>`;
   const rank = x => x.s === 'todo' ? (ord.includes(x) ? ord.indexOf(x) : 500) : 1000;
   const L2 = [...it].sort((a, b) => rank(a) - rank(b));
   $('#list').innerHTML = L2.length ? L2.map(x => {
     const i = ord.indexOf(x), chip = x.s === 'todo' ? '<span class="chip">Awaiting delivery</span>' : x.s === 'done' ? '<span class="chip done">Completed</span>' : '<span class="chip fail">Delivery unsuccessful</span>';
     const btns = x.s === 'todo'
-      ? `<div class="row"><button class="sm teal" data-a="done" data-id="${x.id}">Delivered</button><button class="sm ghost" data-a="fail" data-id="${x.id}">Unsuccessful</button></div><div class="row"><a class="btn sm ghost" href="https://maps.apple.com/?daddr=${x.lat},${x.lng}&dirflg=d">Navigate</a><button class="sm ghost" data-a="del" data-id="${x.id}">Remove</button></div>`
+      ? `<div class="row"><button class="sm teal" data-a="done" data-id="${x.id}">Delivered</button><button class="sm ghost" data-a="fail" data-id="${x.id}">Unsuccessful</button></div><div class="row"><a class="btn sm ghost" href="${navUrl(x)}">Navigate</a><button class="sm ghost" data-a="del" data-id="${x.id}">Remove</button></div>`
       : `<div class="row"><button class="sm ghost" data-a="undo" data-id="${x.id}">Undo</button></div>`;
-    return `<div class="card ${x.s === 'todo' ? '' : 'done'}"><h3>${i >= 0 ? `<span class="n">${i + 1}</span>` : ''}${esc(x.name)}</h3><p>${esc(x.addr)}</p><p>${esc(x.pc)}</p>${x.ex ? '' : '<p class="note">Approximate location (postcode only)</p>'}${chip}${btns}</div>`;
+    return `<div class="card ${x.s === 'todo' ? '' : 'done'}"><h3>${i >= 0 ? `<span class="n">${num(x)}</span>` : ''}${esc(x.name)}</h3><p>${esc(x.addr)}</p><p>${esc(x.pc)}</p>${x.ex ? '' : '<p class="note">Approximate location (postcode only)</p>'}${chip}${btns}</div>`;
   }).join('') : '<p class="note">No deliveries yet. Press Scan medication on the home screen.</p>';
 }
 $('#next').onclick = $('#list').onclick = e => {
@@ -220,6 +226,7 @@ $('#bBack').onclick = backToPharmacy;
 $('#bCfg').onclick = () => { cfg.addr = $('#sAddr').value.trim(); cfg.pc = $('#sPc').value.trim().toUpperCase(); cfg.ll = null; save(); ensurePharm().then(() => alert('Pharmacy saved.')).catch(fail); };
 $('#bWipe').onclick = () => { if (confirm('Delete all deliveries from this phone?')) { day = { d: today(), items: [], order: [], plan: null }; save(); show('home'); } };
 
+$('#bNav').onclick = () => { cfg.nav = cfg.nav === 'apple' ? 'waze' : 'apple'; save(); show('settings'); };
 $('#bEx').onclick = () => { cfg.exact = cfg.exact === false; save(); show('settings'); };
 const wake = async () => { try { if (navigator.wakeLock && document.visibilityState === 'visible') await navigator.wakeLock.request('screen'); } catch (e) {} };
 wake(); document.addEventListener('visibilitychange', wake); // keeps the screen on while you work
