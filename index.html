@@ -26,7 +26,7 @@ button,.btn{font:inherit;font-size:19px;font-weight:700;border:0;border-radius:1
 .teal{background:var(--teal);color:#06292a}.ghost{background:#fff;color:var(--navy);border:2px solid var(--navy)}
 .warn{background:#c0392b}.sm{padding:15px 10px;font-size:17px;margin:0;border-radius:10px}
 .row{display:flex;gap:8px;margin-top:8px}.row>*{flex:1}
-input,select{font:inherit;width:100%;padding:13px;border:2px solid var(--line);border-radius:12px;margin:4px 0 12px;background:#fff;color:var(--ink)}
+input,select,textarea{font:inherit;width:100%;padding:13px;border:2px solid var(--line);border-radius:12px;margin:4px 0 12px;background:#fff;color:var(--ink)}
 label{font-size:14px;color:var(--mute)}
 .card{border:2px solid var(--line);border-radius:14px;padding:12px;margin-bottom:10px}
 .card.done{opacity:.55}.card h3{margin:0;font-size:18px}.card p{margin:2px 0;color:var(--mute);font-size:15px}
@@ -61,7 +61,9 @@ h2{margin:6px 0 12px}#sugg{margin:-8px 0 12px}.sg{background:#eef3f8;color:var(-
   <h2>Scan a sticker</h2>
   <label class="btn teal" for="cam" style="margin-bottom:6px">TAKE PHOTO OF STICKER</label>
   <input id="cam" type="file" accept="image/*" capture="environment" hidden>
-  <p class="note" id="ocrMsg">Hold the phone flat, in good light, filling the frame with the name, address and postcode. The photo is read on your phone and then discarded.</p>
+  <p class="note" id="ocrMsg">Tips: hold the phone straight above the sticker, fill the frame, keep the label flat and avoid glare. The photo is read on your phone and then discarded.</p>
+  <button class="ghost" id="bLive">Scan text with the iPhone camera (most accurate)</button>
+  <div id="live" hidden><textarea id="raw" rows="5" placeholder="Tap here, then tap the Scan Text button above the keyboard and point the camera at the sticker. Tap Insert, then READ THIS TEXT."></textarea><button class="teal" id="bRead">READ THIS TEXT</button></div>
   <div id="form" hidden>
     <label>Name or reference</label><input id="fName" autocomplete="off">
     <label>Address (start typing for suggestions)</label><input id="fAddr" autocomplete="off"><div id="sugg"></div>

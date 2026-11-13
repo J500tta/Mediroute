@@ -79,4 +79,14 @@ function optimise(D, n, closed, ret) {
   }
   return r;
 }
-if (typeof module !== 'undefined') module.exports = { parseSticker, optimise, fixPostcode };
+function splitAddr(q) {
+  let pre = '', s = q.trim();
+  const f = s.match(/^((?:flat|apartment|apt|unit)\s+\w+,?\s*)/i);
+  if (f) { pre = f[1].trim().replace(/,$/, '') + ', '; s = s.slice(f[0].length); }
+  let m = s.match(/^(\d+[A-Za-z]?(?:\s?-\s?\d+[A-Za-z]?)?),?\s+(.+)$/);
+  if (m) return { pre, num: m[1], street: m[2] };
+  m = s.match(/^(.+?)[\s,]+(\d+[A-Za-z]?)$/);
+  if (m) return { pre, num: m[2], street: m[1] };
+  return { pre, num: '', street: s };
+}
+if (typeof module !== 'undefined') module.exports = { parseSticker, optimise, fixPostcode, splitAddr };

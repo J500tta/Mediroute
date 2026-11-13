@@ -114,23 +114,37 @@ function loadTess() {
   });
 }
 // Enlarges, greys and (optionally) black-and-white thresholds the photo so text is crisper.
-async function prep(file, bw) {
+async function prep(file, mode) {
   const bmp = await createImageBitmap(file);
   const k = Math.min(2, 2200 / Math.max(bmp.width, bmp.height));
-  const c = document.createElement('canvas'); c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
-  const x = c.getContext('2d'); x.drawImage(bmp, 0, 0, c.width, c.height);
-  const im = x.getImageData(0, 0, c.width, c.height), d = im.data, h = new Array(256).fill(0);
-  for (let i = 0; i < d.length; i += 4) { const g = (d[i] * .3 + d[i + 1] * .59 + d[i + 2] * .11) | 0; d[i] = d[i + 1] = d[i + 2] = g; h[g]++; }
-  if (bw) { // Otsu threshold
-    const N = d.length / 4; let sum = 0, sB = 0, wB = 0, best = 0, th = 128;
+  const W = Math.round(bmp.width * k), H = Math.round(bmp.height * k);
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const x = c.getContext('2d'); x.drawImage(bmp, 0, 0, W, H);
+  const im = x.getImageData(0, 0, W, H), d = im.data, g = new Uint8Array(W * H);
+  for (let i = 0, j = 0; i < d.length; i += 4, j++) g[j] = (d[i] * .3 + d[i + 1] * .59 + d[i + 2] * .11) | 0;
+  let out = g;
+  if (mode === 'adapt') { // local-average threshold: copes with shadows and glare
+    const S = new Float64Array((W + 1) * (H + 1)), r = Math.max(15, W >> 5);
+    for (let y = 0; y < H; y++) { let row = 0; for (let u = 0; u < W; u++) { row += g[y * W + u]; S[(y + 1) * (W + 1) + u + 1] = S[y * (W + 1) + u + 1] + row; } }
+    out = new Uint8Array(W * H);
+    for (let y = 0; y < H; y++) for (let u = 0; u < W; u++) {
+      const x0 = Math.max(0, u - r), x1 = Math.min(W - 1, u + r), y0 = Math.max(0, y - r), y1 = Math.min(H - 1, y + r);
+      const n = (x1 - x0 + 1) * (y1 - y0 + 1);
+      const sm = S[(y1 + 1) * (W + 1) + x1 + 1] - S[y0 * (W + 1) + x1 + 1] - S[(y1 + 1) * (W + 1) + x0] + S[y0 * (W + 1) + x0];
+      out[y * W + u] = g[y * W + u] * n < sm * 0.9 ? 0 : 255;
+    }
+  } else if (mode === 'otsu') {
+    const h = new Array(256).fill(0); g.forEach(v => h[v]++);
+    const N = g.length; let sum = 0, sB = 0, wB = 0, best = 0, th = 128;
     for (let t = 0; t < 256; t++) sum += t * h[t];
     for (let t = 0; t < 256; t++) {
       wB += h[t]; if (!wB) continue; const wF = N - wB; if (!wF) break;
       sB += t * h[t]; const mB = sB / wB, mF = (sum - sB) / wF, v = wB * wF * (mB - mF) ** 2;
       if (v > best) { best = v; th = t; }
     }
-    for (let i = 0; i < d.length; i += 4) d[i] = d[i + 1] = d[i + 2] = d[i] > th ? 255 : 0;
+    out = g.map(v => v > th ? 255 : 0);
   }
+  for (let i = 0, j = 0; i < d.length; i += 4, j++) d[i] = d[i + 1] = d[i + 2] = out[j];
   x.putImageData(im, 0, 0); return c;
 }
 $('#cam').onchange = async e => {
@@ -141,10 +155,14 @@ $('#cam').onchange = async e => {
     await loadTess();
     const wk = await Tesseract.createWorker('eng');
     await wk.setParameters({ tessedit_pageseg_mode: '6' });
-    let p = { name: '', addr: '', pc: '' };
-    for (const bw of [true, false]) { // try sharpened black-and-white first, then plain grey
-      p = parseSticker((await wk.recognize(await prep(f, bw))).data.text);
-      if (p.pc) break;
+    let p = { name: '', addr: '', pc: '' }, best = -1;
+    const modes = ['adapt', 'otsu', 'grey']; // three ways of cleaning the photo; the best reading wins
+    for (const mode of modes) {
+      busy('Reading sticker (' + (modes.indexOf(mode) + 1) + ' of 3)…');
+      const t = parseSticker((await wk.recognize(await prep(f, mode))).data.text);
+      const sc = (t.pc ? 10 : 0) + (t.phone ? 2 : 0) + (t.name ? 1 : 0) + (t.addr ? 2 : 0);
+      if (sc > best) { best = sc; p = t; }
+      if (t.pc && t.name && t.addr) break;
     }
     await wk.terminate();
     fillForm(p.name, p.addr, p.pc, p.phone);
@@ -168,7 +186,7 @@ $('#bSave').onclick = async () => {
     }
     const c = await geoPc(pc);
     let ex = null;
-    if (picked && picked.addr === addr && distM(picked, c) < 1500) ex = { lat: picked.lat, lng: picked.lng };
+    if (picked && picked.house && picked.addr === addr && distM(picked, c) < 1500) ex = { lat: picked.lat, lng: picked.lng };
     else if (addr && cfg.exact !== false) { busy('Finding the house…'); ex = await geoExact(addr, pc, c); }
     const ll = ex || c;
     day.items.push({ id: Date.now() + Math.random().toString(36).slice(2, 6), name, addr, pc, lat: ll.lat, lng: ll.lng, ex: !!ex, key, bags: 1, urgent, cold, note, phone, s: 'todo' });
@@ -179,7 +197,7 @@ $('#bSave').onclick = async () => {
 };
 function openScan(add) {
   addMode = add; scanned = 0; $('#form').hidden = true; $('#scanCount').textContent = '';
-  $('#ocrMsg').textContent = 'Fill the frame with the name, address and postcode. The photo is read on your phone and then discarded.';
+  $('#ocrMsg').textContent = 'Hold the phone straight above the sticker and fill the frame. The photo is read on your phone and then discarded.';
   show('scan');
 }
 $('#bDone').onclick = () => {
@@ -309,14 +327,20 @@ $('#fAddr').addEventListener('input', () => {
   if (q.length < 4 || cfg.exact === false) { $('#sugg').innerHTML = ''; return; }
   sT = setTimeout(async () => {
     try {
-      const l = cfg.ll || { lat: 52.77, lng: -1.2 };
-      const j = await (await fetch(`https://photon.komoot.io/api/?limit=6&lang=en&lat=${l.lat}&lon=${l.lng}&q=${encodeURIComponent(q)}`)).json();
-      sg = j.features.filter(f => f.properties.countrycode === 'GB').map(f => {
-        const p = f.properties;
-        const first = p.housenumber ? p.housenumber + ' ' + (p.street || p.name || '') : (p.name || p.street || '');
-        return { line: [first, p.city || p.district || p.county].filter(Boolean).join(', '), pc: p.postcode || '', lat: f.geometry.coordinates[1], lng: f.geometry.coordinates[0] };
-      });
-      $('#sugg').innerHTML = sg.map((s, i) => `<button class="sg" data-i="${i}">${esc(s.line)}${s.pc ? ' · ' + esc(s.pc) : ''}</button>`).join('');
+      const l = cfg.ll || { lat: 52.77, lng: -1.2 }, a = splitAddr(q);
+      const get = async t => (await (await fetch(`https://photon.komoot.io/api/?limit=8&lang=en&lat=${l.lat}&lon=${l.lng}&q=${encodeURIComponent(t)}`)).json()).features.filter(f => f.properties.countrycode === 'GB');
+      const [byNum, byStreet] = await Promise.all([a.num ? get(a.street + ' ' + a.num) : [], get(a.street)]);
+      const seen = new Set(); sg = [];
+      const add = (f, house) => {
+        const p = f.properties, st = p.street || p.name;
+        if (!st || (!p.street && p.osm_key !== 'highway')) return;
+        const line = a.pre + (a.num ? a.num + ' ' : '') + st + ((p.city || p.district || p.county) ? ', ' + (p.city || p.district || p.county) : '');
+        if (seen.has(line.toLowerCase())) return; seen.add(line.toLowerCase());
+        sg.push({ line, pc: house ? p.postcode || '' : '', lat: f.geometry.coordinates[1], lng: f.geometry.coordinates[0], house });
+      };
+      byNum.filter(f => (f.properties.housenumber || '').toLowerCase() === a.num.toLowerCase()).forEach(f => add(f, true));
+      byStreet.forEach(f => add(f, false));
+      $('#sugg').innerHTML = sg.slice(0, 6).map((s, i) => `<button class="sg" data-i="${i}">${esc(s.line)}${s.pc ? ' · ' + esc(s.pc) : ''}</button>`).join('');
     } catch (e) { $('#sugg').innerHTML = ''; }
   }, 450);
 });
@@ -324,7 +348,13 @@ $('#sugg').onclick = e => {
   const b = e.target.closest('[data-i]'); if (!b) return;
   const s = sg[+b.dataset.i];
   $('#fAddr').value = s.line; if (s.pc) $('#fPc').value = s.pc.toUpperCase();
-  picked = { addr: s.line, lat: s.lat, lng: s.lng }; $('#sugg').innerHTML = '';
+  picked = { addr: s.line, lat: s.lat, lng: s.lng, house: s.house }; $('#sugg').innerHTML = '';
+};
+$('#bLive').onclick = () => { $('#live').hidden = !$('#live').hidden; if (!$('#live').hidden) $('#raw').focus(); };
+$('#bRead').onclick = () => {
+  const p = parseSticker($('#raw').value);
+  fillForm(p.name, p.addr, p.pc, p.phone); $('#raw').value = ''; $('#live').hidden = true;
+  $('#ocrMsg').textContent = p.pc ? 'Is this right? Tap CONFIRM & ADD, or tap any box to amend it first.' : 'No postcode found. Type it in below, or scan again.';
 };
 render(); show('home');
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
