@@ -19,8 +19,12 @@ const PH_RE = /(\+44[\s-]?\(?0?\)?[\s-]?|\b0)\d[\d\s-]{8,11}\d\b/;
 
 // Turns raw OCR text into {name, addr, pc}. Lines AFTER the postcode are ignored
 // (they usually hold medication info, which MediRoute never keeps).
-function parseSticker(text) {
+const TITLE = /^(mr|mrs|ms|miss|mx|dr|master|prof|rev|sir)\b\.?(\s|$)/i;
+const HNUM = /^((flat|apartment|apt|unit)\s+\w+,?\s*)?\d+[A-Za-z]?\b/i;
+// ownPc = the pharmacy postcode, so the pharmacy's own address on a label is never mistaken for the customer's.
+function parseSticker(text, ownPc) {
   let lines = text.split('\n').map(s => s.replace(/[|_~]/g, ' ').replace(/\s+/g, ' ').trim()).filter(s => s.length > 1);
+  lines = lines.filter(l => (l.match(/[A-Za-z0-9]/g) || []).length >= l.replace(/\s/g, '').length * 0.6); // drop OCR garbage
   let phone = '';
   lines = lines.map(l => {
     const m = l.match(PH_RE);
@@ -30,20 +34,33 @@ function parseSticker(text) {
     }
     return l;
   }).filter(l => l.length > 1);
-  let pc = '', pi = -1;
+  const found = [];
   lines.forEach((l, i) => {
-    if (pi >= 0) return;
     const u = l.toUpperCase();
     let m = u.match(PC_RE);
-    if (m) { pc = m[1] + ' ' + m[2]; pi = i; return; }
+    if (m) { found.push({ i, pc: m[1] + ' ' + m[2] }); return; }
     m = u.replace(/[^A-Z0-9 ]/g, '').match(/([A-Z0-9]{2,4})\s?([A-Z0-9]{3})$/);
     const f = m && fixPostcode(m[1] + m[2]);
-    if (f) { pc = f; pi = i; lines[i] = l.replace(/[A-Za-z0-9]{2,4}\s?[A-Za-z0-9]{3}[^A-Za-z0-9]*$/, ' ' + f); }
+    if (f) { found.push({ i, pc: f }); lines[i] = l.replace(/[A-Za-z0-9]{2,4}\s?[A-Za-z0-9]{3}[^A-Za-z0-9]*$/, ' ' + f); }
   });
-  const head = pi >= 0 ? lines.slice(0, pi + 1) : lines.slice(0, 4);
+  const own = (ownPc || '').replace(/\s/g, '').toUpperCase();
+  const isOwn = x => own && x.pc.replace(/\s/g, '') === own;
+  const pick = found.find(x => !isOwn(x)) || found[0];
+  let pc = '', pi = -1;
+  if (pick) {
+    pc = pick.pc; pi = pick.i;
+    const above = found.filter(x => isOwn(x) && x.i < pi).pop(); // pharmacy block printed above the customer
+    if (above) { lines = lines.slice(above.i + 1); pi -= above.i + 1; }
+  }
+  let head = pi >= 0 ? lines.slice(0, pi + 1) : lines.slice(0, 5);
   if (pi >= 0) head[pi] = head[pi].replace(PC_RE, '').replace(/[,\s]+$/, '').trim();
-  const clean = head.filter(Boolean);
-  return { name: clean[0] || '', addr: clean.slice(1).join(', '), pc, phone };
+  head = head.map(l => l.replace(/^(patient|name|address|deliver(y)? to)\s*[:\-]\s*/i, '')).filter(Boolean);
+  let ni = head.findIndex(l => TITLE.test(l));
+  if (ni < 0) {
+    if (HNUM.test(head[0] || '')) ni = -1;
+    else { const hi = head.findIndex((l, k) => k > 0 && HNUM.test(l)); ni = hi > 0 ? hi - 1 : 0; }
+  }
+  return { name: ni >= 0 ? head[ni] : '', addr: head.slice(ni + 1).join(', '), pc, phone };
 }
 
 // D[i][j] = travel time from node i to node j. Node 0 = start, nodes 1..n = stops.

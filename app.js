@@ -48,6 +48,17 @@ async function geoExact(addr, pc, c) {
   }
   return null;
 }
+// If the postcode is not on the official list, swap in the closest real one (OCR often gets 1-2 characters wrong).
+async function repairPc(pc) {
+  try { await geoPc(pc); return pc; } catch (e) {}
+  const [o, i] = pc.split(' '), flat = pc.replace(/\s/g, '');
+  try {
+    const r = await (await fetch(`https://api.postcodes.io/postcodes/${encodeURIComponent(o + ' ' + (i || '')[0])}/autocomplete?limit=100`)).json();
+    let best = null, bd = 9;
+    (r.result || []).forEach(c => { const k = c.replace(/\s/g, ''); if (k.length !== flat.length) return; let n = 0; for (let j = 0; j < k.length; j++) if (k[j] !== flat[j]) n++; if (n < bd) { bd = n; best = c; } });
+    return best && bd <= 2 ? best : pc;
+  } catch (e) { return pc; }
+}
 async function ensurePharm() {
   if (!cfg.ll || cfg.llPc !== cfg.pc) { cfg.ll = await geoPc(cfg.pc); cfg.llPc = cfg.pc; save(); }
 }
@@ -114,23 +125,62 @@ function loadTess() {
   });
 }
 // Enlarges, greys and (optionally) black-and-white thresholds the photo so text is crisper.
-async function prep(file, mode) {
+// Finds the block of text (the label) in the photo so the reader ignores the rest of the bag.
+function cropBox(bmp) {
+  const full = { x: 0, y: 0, w: bmp.width, h: bmp.height };
+  const sc = Math.min(1, 700 / Math.max(bmp.width, bmp.height)), w = Math.round(bmp.width * sc), h = Math.round(bmp.height * sc);
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const x = c.getContext('2d'); x.drawImage(bmp, 0, 0, w, h);
+  const d = x.getImageData(0, 0, w, h).data, g = new Uint8Array(w * h);
+  for (let i = 0, j = 0; i < d.length; i += 4, j++) g[j] = (d[i] * .3 + d[i + 1] * .59 + d[i + 2] * .11) | 0;
+  const I = new Float64Array((w + 1) * (h + 1)), r = 6, C = 12, cw = Math.ceil(w / C), ch = Math.ceil(h / C), cell = new Float32Array(cw * ch);
+  for (let y = 0; y < h; y++) { let row = 0; for (let u = 0; u < w; u++) { row += g[y * w + u]; I[(y + 1) * (w + 1) + u + 1] = I[y * (w + 1) + u + 1] + row; } }
+  for (let y = 0; y < h; y++) for (let u = 0; u < w; u++) {
+    const x0 = Math.max(0, u - r), x1 = Math.min(w - 1, u + r), y0 = Math.max(0, y - r), y1 = Math.min(h - 1, y + r);
+    const n = (x1 - x0 + 1) * (y1 - y0 + 1), sm = I[(y1 + 1) * (w + 1) + x1 + 1] - I[y0 * (w + 1) + x1 + 1] - I[(y1 + 1) * (w + 1) + x0] + I[y0 * (w + 1) + x0];
+    if (g[y * w + u] * n < sm * 0.85) cell[((y / C) | 0) * cw + ((u / C) | 0)] += 1 / (C * C);
+  }
+  const on = cell.map(v => v > 0.06 && v < 0.6 ? 1 : 0), lab = new Int32Array(cw * ch).fill(-1);
+  let bestN = 0, bb = null;
+  for (let s0 = 0; s0 < on.length; s0++) {
+    if (!on[s0] || lab[s0] >= 0) continue;
+    const st = [s0]; lab[s0] = s0; let n = 0, x0 = cw, x1 = 0, y0 = ch, y1 = 0;
+    while (st.length) {
+      const q = st.pop(), qx = q % cw, qy = (q / cw) | 0; n++;
+      x0 = Math.min(x0, qx); x1 = Math.max(x1, qx); y0 = Math.min(y0, qy); y1 = Math.max(y1, qy);
+      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+        const nx = qx + dx, ny = qy + dy; if (nx < 0 || ny < 0 || nx >= cw || ny >= ch) continue;
+        const p = ny * cw + nx; if (on[p] && lab[p] < 0) { lab[p] = s0; st.push(p); }
+      }
+    }
+    if (n > bestN) { bestN = n; bb = [x0, y0, x1, y1]; }
+  }
+  if (!bb || bestN < 8) return full;
+  const m = 2, X0 = Math.max(0, bb[0] - m) * C / sc, Y0 = Math.max(0, bb[1] - m) * C / sc;
+  const X1 = Math.min(bmp.width, (bb[2] + 1 + m) * C / sc), Y1 = Math.min(bmp.height, (bb[3] + 1 + m) * C / sc);
+  const box = { x: X0, y: Y0, w: X1 - X0, h: Y1 - Y0 };
+  const share = box.w * box.h / (bmp.width * bmp.height);
+  return share < 0.08 || share > 0.95 ? full : box;
+}
+// Crops, enlarges, greys and cleans the photo (adapt = shadow-proof, otsu = plain black and white), with optional rotation.
+async function prep(file, mode, rot = 0, cr = 1) {
   const bmp = await createImageBitmap(file);
-  const k = Math.min(2, 2200 / Math.max(bmp.width, bmp.height));
-  const W = Math.round(bmp.width * k), H = Math.round(bmp.height * k);
+  const box = cr ? cropBox(bmp) : { x: 0, y: 0, w: bmp.width, h: bmp.height };
+  const k = Math.min(2.5, 2400 / Math.max(box.w, box.h)), W0 = Math.round(box.w * k), H0 = Math.round(box.h * k), swap = rot === 90 || rot === 270;
+  const W = swap ? H0 : W0, H = swap ? W0 : H0;
   const c = document.createElement('canvas'); c.width = W; c.height = H;
-  const x = c.getContext('2d'); x.drawImage(bmp, 0, 0, W, H);
+  const x = c.getContext('2d'); x.translate(W / 2, H / 2); x.rotate(rot * Math.PI / 180);
+  x.drawImage(bmp, box.x, box.y, box.w, box.h, -W0 / 2, -H0 / 2, W0, H0); x.setTransform(1, 0, 0, 1, 0, 0);
   const im = x.getImageData(0, 0, W, H), d = im.data, g = new Uint8Array(W * H);
   for (let i = 0, j = 0; i < d.length; i += 4, j++) g[j] = (d[i] * .3 + d[i + 1] * .59 + d[i + 2] * .11) | 0;
   let out = g;
-  if (mode === 'adapt') { // local-average threshold: copes with shadows and glare
+  if (mode === 'adapt') {
     const S = new Float64Array((W + 1) * (H + 1)), r = Math.max(15, W >> 5);
     for (let y = 0; y < H; y++) { let row = 0; for (let u = 0; u < W; u++) { row += g[y * W + u]; S[(y + 1) * (W + 1) + u + 1] = S[y * (W + 1) + u + 1] + row; } }
     out = new Uint8Array(W * H);
     for (let y = 0; y < H; y++) for (let u = 0; u < W; u++) {
       const x0 = Math.max(0, u - r), x1 = Math.min(W - 1, u + r), y0 = Math.max(0, y - r), y1 = Math.min(H - 1, y + r);
-      const n = (x1 - x0 + 1) * (y1 - y0 + 1);
-      const sm = S[(y1 + 1) * (W + 1) + x1 + 1] - S[y0 * (W + 1) + x1 + 1] - S[(y1 + 1) * (W + 1) + x0] + S[y0 * (W + 1) + x0];
+      const n = (x1 - x0 + 1) * (y1 - y0 + 1), sm = S[(y1 + 1) * (W + 1) + x1 + 1] - S[y0 * (W + 1) + x1 + 1] - S[(y1 + 1) * (W + 1) + x0] + S[y0 * (W + 1) + x0];
       out[y * W + u] = g[y * W + u] * n < sm * 0.9 ? 0 : 255;
     }
   } else if (mode === 'otsu') {
@@ -156,17 +206,19 @@ $('#cam').onchange = async e => {
     const wk = await Tesseract.createWorker('eng');
     await wk.setParameters({ tessedit_pageseg_mode: '6' });
     let p = { name: '', addr: '', pc: '' }, best = -1;
-    const modes = ['adapt', 'otsu', 'grey']; // three ways of cleaning the photo; the best reading wins
-    for (const mode of modes) {
-      busy('Reading sticker (' + (modes.indexOf(mode) + 1) + ' of 3)…');
-      const t = parseSticker((await wk.recognize(await prep(f, mode))).data.text);
+    const tries = [[1, 'adapt', 0], [1, 'otsu', 0], [0, 'adapt', 0], [1, 'adapt', 90], [1, 'adapt', 270]]; // [crop to label, clean-up, rotation]
+    for (const [cr, mode, rot] of tries) {
+      if (best >= 10 && rot) break;
+      const t = parseSticker((await wk.recognize(await prep(f, mode, rot, cr))).data.text, cfg.pc);
       const sc = (t.pc ? 10 : 0) + (t.phone ? 2 : 0) + (t.name ? 1 : 0) + (t.addr ? 2 : 0);
       if (sc > best) { best = sc; p = t; }
       if (t.pc && t.name && t.addr) break;
     }
     await wk.terminate();
+    let note = '';
+    if (p.pc) { const f2 = await repairPc(p.pc); if (f2 !== p.pc) { p.pc = f2; note = ' The postcode was corrected using the official list, so please check it.'; } }
     fillForm(p.name, p.addr, p.pc, p.phone);
-    $('#ocrMsg').textContent = p.pc ? 'Is this right? Tap CONFIRM & ADD, or tap any box to amend it first.' : 'No postcode found. Type it in below, or retake the photo.';
+    $('#ocrMsg').textContent = p.pc ? 'Is this right? Tap CONFIRM & ADD, or tap any box to amend it first.' + note : 'No postcode found. Type it in below, or retake the photo.';
   } catch (err) { fail(err); } finally { busy(0); }
 };
 function fillForm(n, a, p, ph = '') { $('#form').hidden = false; $('#fName').value = n; $('#fAddr').value = a; $('#fPc').value = p; $('#fFlag').value = '0'; $('#fNote').value = ''; $('#fPhone').value = ph; picked = null; $('#sugg').innerHTML = ''; }
@@ -327,7 +379,8 @@ $('#fAddr').addEventListener('input', () => {
   if (q.length < 4 || cfg.exact === false) { $('#sugg').innerHTML = ''; return; }
   sT = setTimeout(async () => {
     try {
-      const l = cfg.ll || { lat: 52.77, lng: -1.2 }, a = splitAddr(q);
+      let l = cfg.ll || { lat: 52.77, lng: -1.2 }; const a = splitAddr(q), pcv = $('#fPc').value.trim();
+      if (/^[A-Za-z]{1,2}\d[A-Za-z\d]?\s*\d[A-Za-z]{2}$/.test(pcv)) { try { l = await geoPc(pcv); } catch (e) {} }
       const get = async t => (await (await fetch(`https://photon.komoot.io/api/?limit=8&lang=en&lat=${l.lat}&lon=${l.lng}&q=${encodeURIComponent(t)}`)).json()).features.filter(f => f.properties.countrycode === 'GB');
       const [byNum, byStreet] = await Promise.all([a.num ? get(a.street + ' ' + a.num) : [], get(a.street)]);
       const seen = new Set(); sg = [];
@@ -340,21 +393,23 @@ $('#fAddr').addEventListener('input', () => {
       };
       byNum.filter(f => (f.properties.housenumber || '').toLowerCase() === a.num.toLowerCase()).forEach(f => add(f, true));
       byStreet.forEach(f => add(f, false));
-      $('#sugg').innerHTML = sg.slice(0, 6).map((s, i) => `<button class="sg" data-i="${i}">${esc(s.line)}${s.pc ? ' · ' + esc(s.pc) : ''}</button>`).join('');
+      sg = sg.slice(0, 6);
+      const need = sg.filter(s => !s.pc);
+      if (need.length) { // fill in the nearest postcode where the map data has none
+        try {
+          const r = await (await fetch('https://api.postcodes.io/postcodes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ geolocations: need.map(s => ({ longitude: s.lng, latitude: s.lat, limit: 1, radius: 300 })) }) })).json();
+          r.result.forEach((x, i) => { if (x.result && x.result[0]) { need[i].pc = x.result[0].postcode; need[i].guess = true; } });
+        } catch (e) {}
+      }
+      $('#sugg').innerHTML = sg.map((s, i) => `<button class="sg" data-i="${i}">${esc(s.line)}${s.pc ? ' · ' + esc(s.pc) + (s.guess ? ' (nearest)' : '') : ''}</button>`).join('');
     } catch (e) { $('#sugg').innerHTML = ''; }
   }, 450);
 });
 $('#sugg').onclick = e => {
   const b = e.target.closest('[data-i]'); if (!b) return;
   const s = sg[+b.dataset.i];
-  $('#fAddr').value = s.line; if (s.pc) $('#fPc').value = s.pc.toUpperCase();
+  $('#fAddr').value = s.line; if (s.pc && (!$('#fPc').value.trim() || s.house || s.guess)) $('#fPc').value = s.pc.toUpperCase();
   picked = { addr: s.line, lat: s.lat, lng: s.lng, house: s.house }; $('#sugg').innerHTML = '';
-};
-$('#bLive').onclick = () => { $('#live').hidden = !$('#live').hidden; if (!$('#live').hidden) $('#raw').focus(); };
-$('#bRead').onclick = () => {
-  const p = parseSticker($('#raw').value);
-  fillForm(p.name, p.addr, p.pc, p.phone); $('#raw').value = ''; $('#live').hidden = true;
-  $('#ocrMsg').textContent = p.pc ? 'Is this right? Tap CONFIRM & ADD, or tap any box to amend it first.' : 'No postcode found. Type it in below, or scan again.';
 };
 render(); show('home');
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
