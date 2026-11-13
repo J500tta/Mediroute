@@ -3,7 +3,7 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt
 const today = () => new Date().toISOString().slice(0, 10);
 const navUrl = (to, from) => cfg.nav === 'apple'
   ? `https://maps.apple.com/?${from ? `saddr=${from.lat},${from.lng}&` : ''}daddr=${to.lat},${to.lng}&dirflg=d`
-  : `https://waze.com/ul?ll=${to.lat},${to.lng}&navigate=yes`;
+  : `waze://?ll=${to.lat},${to.lng}&navigate=yes`;
 const OSRM = 'https://router.project-osrm.org';
 
 // ---- Storage (this phone only). Deliveries are wiped each new day. ----
@@ -23,7 +23,7 @@ const busy = m => { const b = $('#busy'); b.hidden = !m; b.textContent = m || ''
 const show = v => {
   document.querySelectorAll('main>section').forEach(s => s.hidden = s.id !== 'v-' + v);
   if (v === 'list') drawMap();
-  if (v === 'settings') { $('#sAddr').value = cfg.addr; $('#sPc').value = cfg.pc; $('#bNav').textContent = 'Navigation app: ' + (cfg.nav === 'apple' ? 'Apple Maps' : 'Waze'); $('#bEx').textContent = 'Exact house lookup: ' + (cfg.exact === false ? 'OFF' : 'ON'); }
+  if (v === 'settings') { $('#sAddr').value = cfg.addr; $('#sPc').value = cfg.pc; $('#bPin').textContent = 'Passcode: ' + (cfg.pin ? 'ON' : 'OFF') + ' (tap to change)'; $('#bNav').textContent = 'Navigation app: ' + (cfg.nav === 'apple' ? 'Apple Maps' : 'Waze'); $('#bEx').textContent = 'Address search and exact house lookup: ' + (cfg.exact === false ? 'OFF' : 'ON'); }
   window.scrollTo(0, 0);
 };
 const mins = s => s >= 3600 ? Math.floor(s / 3600) + ' h ' + Math.round(s % 3600 / 60) + ' min' : Math.round(s / 60) + ' min';
@@ -77,12 +77,22 @@ async function plan(mode) {
     busy('Planning route…');
     const j = await osrm('/table/v1/driving/' + coords([start, ...out]) + '?annotations=duration');
     const D = j.durations.map(r => r.map(v => v == null ? 1e9 : v));
-    const seq = optimise(D, out.length, closed).map(i => out[i - 1]);
+    const grp = [[], [], []]; // urgent/fridge, normal, skipped
+    out.forEach((x, i) => grp[x.skip ? 2 : x.urgent || x.cold ? 0 : 1].push(i + 1));
+    const order = []; let from = 0;
+    grp.forEach((idxs, g) => {
+      if (!idxs.length) return;
+      const pts = [from, ...idxs], M = pts.map(a => pts.map(b => D[a][b]));
+      const ret = [0, ...idxs.map(a => D[a][0])], last = grp.slice(g + 1).every(a => !a.length);
+      const r = optimise(M, idxs.length, closed && last, ret).map(k => idxs[k - 1]);
+      order.push(...r); from = r[r.length - 1];
+    });
+    const seq = order.map(i => out[i - 1]);
     const path = [start, ...seq, ...(closed ? [cfg.ll] : [])];
     const rt = (await osrm('/route/v1/driving/' + coords(path) + '?overview=full&geometries=geojson')).routes[0];
     day.order = seq.map(x => x.id);
     day.plan = { mode, closed, start, dist: rt.distance, dur: rt.duration, geo: rt.geometry };
-    save(); show('list');
+    save(); show('list'); trackMiles();
   } catch (e) { fail(e); } finally { busy(0); }
 }
 async function backToPharmacy() {
@@ -137,22 +147,31 @@ $('#cam').onchange = async e => {
       if (p.pc) break;
     }
     await wk.terminate();
-    fillForm(p.name, p.addr, p.pc);
-    $('#ocrMsg').textContent = p.pc ? 'Check the details below, fix anything wrong, then save.' : 'No postcode found. Type it in below, or retake the photo.';
+    fillForm(p.name, p.addr, p.pc, p.phone);
+    $('#ocrMsg').textContent = p.pc ? 'Is this right? Tap CONFIRM & ADD, or tap any box to amend it first.' : 'No postcode found. Type it in below, or retake the photo.';
   } catch (err) { fail(err); } finally { busy(0); }
 };
-function fillForm(n, a, p) { $('#form').hidden = false; $('#fName').value = n; $('#fAddr').value = a; $('#fPc').value = p; }
+function fillForm(n, a, p, ph = '') { $('#form').hidden = false; $('#fName').value = n; $('#fAddr').value = a; $('#fPc').value = p; $('#fFlag').value = '0'; $('#fNote').value = ''; $('#fPhone').value = ph; picked = null; $('#sugg').innerHTML = ''; }
 $('#bManual').onclick = () => fillForm('', '', '');
 $('#bSave').onclick = async () => {
   const pc = $('#fPc').value.trim().toUpperCase(), name = $('#fName').value.trim() || 'Delivery', addr = $('#fAddr').value.trim();
   if (!pc) return alert('Enter a postcode.');
   busy('Checking postcode…');
   try {
+    const fl = +$('#fFlag').value, urgent = !!(fl & 1), cold = !!(fl & 2), note = $('#fNote').value.trim(), phone = $('#fPhone').value.trim();
+    const key = (addr + pc).toLowerCase().replace(/[^a-z0-9]/g, '');
+    const dup = day.items.find(i => i.s === 'todo' && i.key === key);
+    if (dup) { // same address: one stop, more bags
+      dup.bags = (dup.bags || 1) + 1; dup.urgent = dup.urgent || urgent; dup.cold = dup.cold || cold; if (phone && !dup.phone) dup.phone = phone;
+      if (note) dup.note = (dup.note ? dup.note + '; ' : '') + note;
+      scanned++; save(); $('#form').hidden = true; $('#scanCount').textContent = 'Added to an existing stop (' + dup.bags + ' bags).'; return;
+    }
     const c = await geoPc(pc);
     let ex = null;
-    if (addr && cfg.exact !== false) { busy('Finding the house…'); ex = await geoExact(addr, pc, c); }
+    if (picked && picked.addr === addr && distM(picked, c) < 1500) ex = { lat: picked.lat, lng: picked.lng };
+    else if (addr && cfg.exact !== false) { busy('Finding the house…'); ex = await geoExact(addr, pc, c); }
     const ll = ex || c;
-    day.items.push({ id: Date.now() + Math.random().toString(36).slice(2, 6), name, addr, pc, lat: ll.lat, lng: ll.lng, ex: !!ex, s: 'todo' });
+    day.items.push({ id: Date.now() + Math.random().toString(36).slice(2, 6), name, addr, pc, lat: ll.lat, lng: ll.lng, ex: !!ex, key, bags: 1, urgent, cold, note, phone, s: 'todo' });
     scanned++; save();
     $('#form').hidden = true; $('#scanCount').textContent = scanned + ' added this session. Scan the next bag.';
     $('#ocrMsg').textContent = 'Saved. Take the next photo.';
@@ -184,7 +203,7 @@ function drawMap() {
   const pin = (ll, t, c) => L.marker([ll.lat, ll.lng], { icon: L.divIcon({ className: '', html: `<div class="pin" style="background:${c}">${t}</div>`, iconSize: [28, 28] }) }).addTo(layer);
   pin(p.start, p.closed ? 'P' : '●', '#0B1F3A');
   todoOrdered().forEach(x => pin(x, day.order.indexOf(x.id) + 1, '#0FB5A6'));
-  $('#sum').textContent = `${mins(p.dur)} · ${km(p.dist)} · ${todoOrdered().length} stops left` + (p.closed ? ' · returns to pharmacy' : ' · ends at last stop');
+  $('#sum').textContent = `${mins(p.dur)} · ${km(p.dist)} · ${todoOrdered().length} stops left` + (p.closed ? ' · returns to pharmacy' : ' · ends at last stop') + (p.stale ? ' · order changed by hand; time and line are from the last plan' : '');
   setTimeout(() => { map.invalidateSize(); map.fitBounds(line.getBounds(), { padding: [20, 20] }); }, 60);
 }
 const todoOrdered = () => day.order.map(id => day.items.find(x => x.id === id)).filter(x => x && x.s === 'todo');
@@ -192,26 +211,28 @@ function render() {
   const it = day.items, d = it.filter(x => x.s === 'done').length, o = it.filter(x => x.s === 'todo').length;
   $('#nT').textContent = it.length; $('#nD').textContent = d; $('#nO').textContent = o;
   const ord = todoOrdered();
-  const nx = ord[0] || it.find(x => x.s === 'todo');
+  const nx = ord.find(x => !x.skip) || it.find(x => x.s === 'todo' && !x.skip) || ord[0] || it.find(x => x.s === 'todo');
   const num = x => day.order.indexOf(x.id) + 1;
   $('#order').hidden = !ord.length;
   $('#order').innerHTML = ord.length ? `<details open><summary>Route order: ${ord.length} stops left</summary><p class="note">Write these numbers on the bags. They stay the same until you plan again.</p>${ord.map(x => `<div class="ol"><span class="n">${num(x)}</span><div><b>${esc(x.name)}</b><br>${esc(x.addr)}, ${esc(x.pc)}</div></div>`).join('')}</details>` : '';
   $('#next').hidden = !nx;
-  if (nx) $('#next').innerHTML = `<h3>${ord[0] ? 'Stop ' + num(nx) : 'Next'}: ${esc(nx.name)}</h3><p>${esc(nx.addr)}, ${esc(nx.pc)}</p><a class="btn teal" href="${navUrl(nx)}">NAVIGATE</a><div class="row"><button class="teal" data-a="done" data-id="${nx.id}">DELIVERED</button><button class="ghost" data-a="fail" data-id="${nx.id}">UNSUCCESSFUL</button></div>`;
+  if (nx) $('#next').innerHTML = `<h3>${num(nx) > 0 ? 'Stop ' + num(nx) : 'Next'}: ${esc(nx.name)}</h3><p>${esc(nx.addr)}, ${esc(nx.pc)}</p><a class="btn teal" href="${navUrl(nx)}">NAVIGATE</a><div class="row"><button class="teal" data-a="done" data-id="${nx.id}">DELIVERED</button><button class="ghost" data-a="fail" data-id="${nx.id}">UNSUCCESSFUL</button></div>`;
   const rank = x => x.s === 'todo' ? (ord.includes(x) ? ord.indexOf(x) : 500) : 1000;
   const L2 = [...it].sort((a, b) => rank(a) - rank(b));
   $('#list').innerHTML = L2.length ? L2.map(x => {
     const i = ord.indexOf(x), chip = x.s === 'todo' ? '<span class="chip">Awaiting delivery</span>' : x.s === 'done' ? '<span class="chip done">Completed</span>' : '<span class="chip fail">Delivery unsuccessful</span>';
     const btns = x.s === 'todo'
-      ? `<div class="row"><button class="sm teal" data-a="done" data-id="${x.id}">Delivered</button><button class="sm ghost" data-a="fail" data-id="${x.id}">Unsuccessful</button></div><div class="row"><a class="btn sm ghost" href="${navUrl(x)}">Navigate</a><button class="sm ghost" data-a="del" data-id="${x.id}">Remove</button></div>`
+      ? `<div class="row"><button class="sm teal" data-a="done" data-id="${x.id}">Delivered</button><button class="sm ghost" data-a="fail" data-id="${x.id}">Unsuccessful</button></div><div class="row"><a class="btn sm ghost" href="${navUrl(x)}">Navigate</a><button class="sm ghost" data-a="del" data-id="${x.id}">Remove</button></div><div class="row"><button class="sm ghost" data-a="skip" data-id="${x.id}">${x.skip ? 'Unskip' : 'Skip for now'}</button><button class="sm ghost" data-a="up" data-id="${x.id}">▲</button><button class="sm ghost" data-a="down" data-id="${x.id}">▼</button></div>`
       : `<div class="row"><button class="sm ghost" data-a="undo" data-id="${x.id}">Undo</button></div>`;
-    return `<div class="card ${x.s === 'todo' ? '' : 'done'}"><h3>${i >= 0 ? `<span class="n">${num(x)}</span>` : ''}${esc(x.name)}</h3><p>${esc(x.addr)}</p><p>${esc(x.pc)}</p>${x.ex ? '' : '<p class="note">Approximate location (postcode only)</p>'}${chip}${btns}</div>`;
+    return `<div class="card ${x.s === 'todo' ? '' : 'done'}"><h3>${i >= 0 ? `<span class="n">${num(x)}</span>` : ''}${esc(x.name)}</h3><p>${esc(x.addr)}</p><p>${esc(x.pc)}</p>${x.ex ? '' : '<p class="note">Approximate location (postcode only)</p>'}${chip} ${flags(x)}${x.phone ? `<p><a href="tel:${esc(x.phone)}">${esc(x.phone)}</a></p>` : ''}${x.note ? `<p><i>${esc(x.note)}</i></p>` : ''}${btns}</div>`;
   }).join('') : '<p class="note">No deliveries yet. Press Scan medication on the home screen.</p>';
 }
 $('#next').onclick = $('#list').onclick = e => {
   const b = e.target.closest('[data-a]'); if (!b) return;
   const x = day.items.find(i => i.id === b.dataset.id), a = b.dataset.a;
   if (a === 'done') x.s = 'done'; else if (a === 'fail') x.s = 'fail'; else if (a === 'undo') x.s = 'todo';
+  else if (a === 'skip') x.skip = !x.skip;
+  else if (a === 'up' || a === 'down') move(x, a === 'up' ? -1 : 1);
   else if (a === 'del' && confirm('Remove this delivery?')) day.items = day.items.filter(i => i !== x);
   save(); if (day.plan) drawMap();
 };
@@ -230,5 +251,80 @@ $('#bNav').onclick = () => { cfg.nav = cfg.nav === 'apple' ? 'waze' : 'apple'; s
 $('#bEx').onclick = () => { cfg.exact = cfg.exact === false; save(); show('settings'); };
 const wake = async () => { try { if (navigator.wakeLock && document.visibilityState === 'visible') await navigator.wakeLock.request('screen'); } catch (e) {} };
 wake(); document.addEventListener('visibilitychange', wake); // keeps the screen on while you work
+const flags = x => (x.bags > 1 ? `<span class="chip">${x.bags} bags</span> ` : '') + (x.urgent ? '<span class="chip fail">Urgent</span> ' : '') + (x.cold ? '<span class="chip cold">Fridge</span> ' : '') + (x.skip ? '<span class="chip skip">Skipped</span>' : '');
+function move(x, dir) { // nudge a stop earlier or later by hand
+  const t = todoOrdered(), y = t[t.indexOf(x) + dir];
+  if (!y || t.indexOf(x) < 0) return;
+  const i = day.order.indexOf(x.id), j = day.order.indexOf(y.id);
+  [day.order[i], day.order[j]] = [day.order[j], day.order[i]];
+  if (day.plan) day.plan.stale = true;
+}
+// Mileage: adds up GPS distance only while the app is open. Stores distance only, never places.
+let tracking = false, lastFix = null;
+function trackMiles() {
+  if (tracking || !navigator.geolocation) return; tracking = true;
+  navigator.geolocation.watchPosition(p => {
+    if (p.coords.accuracy > 50) return;
+    const c = { lat: p.coords.latitude, lng: p.coords.longitude };
+    if (!lastFix) { lastFix = c; return; }
+    const d = distM(lastFix, c);
+    if (d >= 3000) lastFix = c;
+    else if (d > 30) {
+      lastFix = c; day.miles = (day.miles || 0) + d;
+      localStorage.setItem('mr.day', JSON.stringify(day));
+      const lg = JSON.parse(localStorage.getItem('mr.log') || '{}'); lg[day.d] = Math.round(day.miles); localStorage.setItem('mr.log', JSON.stringify(lg));
+    }
+  }, () => {}, { enableHighAccuracy: true });
+}
+function sumText(names) {
+  const it = day.items, c = s => it.filter(x => x.s === s).length, bad = it.filter(x => x.s === 'fail');
+  return `MediRoute round ${day.d}\nDelivered: ${c('done')}\nUnsuccessful: ${c('fail')}\nOutstanding: ${c('todo')}\nMiles driven today: ${((day.miles || 0) / 1609.34).toFixed(1)}`
+    + (bad.length ? '\n\nTake back to pharmacy:\n' + bad.map(x => `- Stop ${day.order.indexOf(x.id) + 1 || '?'}, ${names ? x.name + ', ' : ''}${x.pc}`).join('\n') : '');
+}
+$('#bSum').onclick = () => {
+  const lg = JSON.parse(localStorage.getItem('mr.log') || '{}');
+  $('#sumBody').innerHTML = `<pre style="white-space:pre-wrap;font:inherit">${esc(sumText(false))}</pre><h3>Mileage log</h3>` +
+    (Object.keys(lg).sort().reverse().slice(0, 14).map(d => `<p>${esc(d)}: ${(lg[d] / 1609.34).toFixed(1)} miles</p>`).join('') || '<p class="note">Nothing logged yet.</p>') +
+    '<p class="note">Miles count only while MediRoute is open on screen. Distances only; no addresses are logged.</p>';
+  show('sum');
+};
+$('#bCopy').onclick = async () => { const t = sumText(confirm('Include customer names? Cancel leaves them out.')); try { await navigator.clipboard.writeText(t); alert('Copied.'); } catch (e) { alert(t); } };
+// Passcode: a casual lock, not encryption. Your iPhone passcode is the real protection.
+const sha = async s => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('mr:' + s)))].map(b => b.toString(16).padStart(2, '0')).join('');
+function lock() { if (cfg.pin) { $('#lock').hidden = false; $('#pin').value = ''; } }
+$('#bUnlock').onclick = async () => { if (await sha($('#pin').value) === cfg.pin) $('#lock').hidden = true; else { $('#pin').value = ''; alert('Wrong passcode.'); } };
+$('#bPin').onclick = async () => {
+  const p = prompt('New passcode, 4 or more digits. Leave empty to remove it.'); if (p === null) return;
+  if (p && !/^\d{4,}$/.test(p)) return alert('Use 4 or more digits.');
+  cfg.pin = p ? await sha(p) : null; save(); show('settings');
+};
+let hiddenAt = 0;
+document.addEventListener('visibilitychange', () => { if (document.hidden) hiddenAt = Date.now(); else if (hiddenAt && Date.now() - hiddenAt > 180000) lock(); });
+if (day.plan) trackMiles();
+lock();
+// Address suggestions (Photon, free, OpenStreetMap data). Respects the Settings switch.
+let picked = null, sg = [], sT;
+$('#fAddr').addEventListener('input', () => {
+  clearTimeout(sT); const q = $('#fAddr').value.trim();
+  if (q.length < 4 || cfg.exact === false) { $('#sugg').innerHTML = ''; return; }
+  sT = setTimeout(async () => {
+    try {
+      const l = cfg.ll || { lat: 52.77, lng: -1.2 };
+      const j = await (await fetch(`https://photon.komoot.io/api/?limit=6&lang=en&lat=${l.lat}&lon=${l.lng}&q=${encodeURIComponent(q)}`)).json();
+      sg = j.features.filter(f => f.properties.countrycode === 'GB').map(f => {
+        const p = f.properties;
+        const first = p.housenumber ? p.housenumber + ' ' + (p.street || p.name || '') : (p.name || p.street || '');
+        return { line: [first, p.city || p.district || p.county].filter(Boolean).join(', '), pc: p.postcode || '', lat: f.geometry.coordinates[1], lng: f.geometry.coordinates[0] };
+      });
+      $('#sugg').innerHTML = sg.map((s, i) => `<button class="sg" data-i="${i}">${esc(s.line)}${s.pc ? ' · ' + esc(s.pc) : ''}</button>`).join('');
+    } catch (e) { $('#sugg').innerHTML = ''; }
+  }, 450);
+});
+$('#sugg').onclick = e => {
+  const b = e.target.closest('[data-i]'); if (!b) return;
+  const s = sg[+b.dataset.i];
+  $('#fAddr').value = s.line; if (s.pc) $('#fPc').value = s.pc.toUpperCase();
+  picked = { addr: s.line, lat: s.lat, lng: s.lng }; $('#sugg').innerHTML = '';
+};
 render(); show('home');
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});

@@ -15,10 +15,21 @@ function fixPostcode(raw) {
   return PC_RE.test(pc) ? pc : '';
 }
 
+const PH_RE = /(\+44[\s-]?\(?0?\)?[\s-]?|\b0)\d[\d\s-]{8,11}\d\b/;
+
 // Turns raw OCR text into {name, addr, pc}. Lines AFTER the postcode are ignored
 // (they usually hold medication info, which MediRoute never keeps).
 function parseSticker(text) {
-  const lines = text.split('\n').map(s => s.replace(/[|_~]/g, ' ').replace(/\s+/g, ' ').trim()).filter(s => s.length > 1);
+  let lines = text.split('\n').map(s => s.replace(/[|_~]/g, ' ').replace(/\s+/g, ' ').trim()).filter(s => s.length > 1);
+  let phone = '';
+  lines = lines.map(l => {
+    const m = l.match(PH_RE);
+    if (!phone && m) {
+      const d = m[0].replace(/[^\d+]/g, '');
+      if (/^0\d{10}$/.test(d) || /^\+44\d{10}$/.test(d)) { phone = d; l = l.replace(m[0], ' ').replace(/\b(tel|telephone|phone|mobile|mob)\b\.?:?/i, '').trim(); }
+    }
+    return l;
+  }).filter(l => l.length > 1);
   let pc = '', pi = -1;
   lines.forEach((l, i) => {
     if (pi >= 0) return;
@@ -32,17 +43,17 @@ function parseSticker(text) {
   const head = pi >= 0 ? lines.slice(0, pi + 1) : lines.slice(0, 4);
   if (pi >= 0) head[pi] = head[pi].replace(PC_RE, '').replace(/[,\s]+$/, '').trim();
   const clean = head.filter(Boolean);
-  return { name: clean[0] || '', addr: clean.slice(1).join(', '), pc };
+  return { name: clean[0] || '', addr: clean.slice(1).join(', '), pc, phone };
 }
 
 // D[i][j] = travel time from node i to node j. Node 0 = start, nodes 1..n = stops.
 // closed=true returns to node 0 at the end; closed=false ends at the last stop.
 // Nearest-neighbour start, then 2-opt + or-opt improvement until no gain.
-function optimise(D, n, closed) {
+function optimise(D, n, closed, ret) {
   const cost = r => {
     let c = D[0][r[0]];
     for (let i = 0; i < r.length - 1; i++) c += D[r[i]][r[i + 1]];
-    return closed ? c + D[r[r.length - 1]][0] : c;
+    return closed ? c + (ret ? ret[r[r.length - 1]] : D[r[r.length - 1]][0]) : c;
   };
   const left = [...Array(n).keys()].map(i => i + 1);
   let r = [], cur = 0;

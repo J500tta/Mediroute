@@ -26,7 +26,7 @@ button,.btn{font:inherit;font-size:19px;font-weight:700;border:0;border-radius:1
 .teal{background:var(--teal);color:#06292a}.ghost{background:#fff;color:var(--navy);border:2px solid var(--navy)}
 .warn{background:#c0392b}.sm{padding:15px 10px;font-size:17px;margin:0;border-radius:10px}
 .row{display:flex;gap:8px;margin-top:8px}.row>*{flex:1}
-input{font:inherit;width:100%;padding:13px;border:2px solid var(--line);border-radius:12px;margin:4px 0 12px}
+input,select{font:inherit;width:100%;padding:13px;border:2px solid var(--line);border-radius:12px;margin:4px 0 12px;background:#fff;color:var(--ink)}
 label{font-size:14px;color:var(--mute)}
 .card{border:2px solid var(--line);border-radius:14px;padding:12px;margin-bottom:10px}
 .card.done{opacity:.55}.card h3{margin:0;font-size:18px}.card p{margin:2px 0;color:var(--mute);font-size:15px}
@@ -37,7 +37,7 @@ label{font-size:14px;color:var(--mute)}
 .pin{width:28px;height:28px;border-radius:50%;color:#fff;font-weight:800;display:flex;align-items:center;justify-content:center;border:2px solid #fff;box-shadow:0 1px 4px #0006}
 .note{font-size:13px;color:var(--mute);margin:4px 0 12px}
 #busy{position:fixed;inset:0;background:#0B1F3Acc;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;text-align:center;padding:30px;z-index:9999}
-h2{margin:6px 0 12px}.next{background:var(--navy);color:#fff;border-radius:16px;padding:16px;margin-bottom:14px}.next h3{margin:0 0 2px;font-size:22px}.next p{margin:0 0 12px;color:#cfe0f0}.next .btn,.next button{margin-bottom:8px}#order{border:2px solid var(--line);border-radius:16px;padding:12px 14px;margin-bottom:14px}#order summary{font-weight:700}.ol{display:flex;align-items:center;gap:6px;padding:8px 0;border-top:1px solid var(--line);margin-top:8px;font-size:15px}.n{flex-shrink:0}
+h2{margin:6px 0 12px}#sugg{margin:-8px 0 12px}.sg{background:#eef3f8;color:var(--ink);font-weight:600;font-size:16px;padding:12px;margin:0 0 4px;text-align:left;border-radius:10px}.chip.cold{background:#e6f0ff;color:#1b4f9c}.chip.skip{background:#fff3d6;color:#8a5a00}#lock{position:fixed;inset:0;background:var(--navy);color:#fff;z-index:10000;display:flex;align-items:center;justify-content:center;padding:30px}#lock>div{width:100%;max-width:360px;text-align:center}.next{background:var(--navy);color:#fff;border-radius:16px;padding:16px;margin-bottom:14px}.next h3{margin:0 0 2px;font-size:22px}.next p{margin:0 0 12px;color:#cfe0f0}.next .btn,.next button{margin-bottom:8px}#order{border:2px solid var(--line);border-radius:16px;padding:12px 14px;margin-bottom:14px}#order summary{font-weight:700}.ol{display:flex;align-items:center;gap:6px;padding:8px 0;border-top:1px solid var(--line);margin-top:8px;font-size:15px}.n{flex-shrink:0}
 </style></head><body>
 <header>
   <h1>MEDIROUTE</h1><p>Today’s deliveries</p>
@@ -52,6 +52,7 @@ h2{margin:6px 0 12px}.next{background:var(--navy);color:#fff;border-radius:16px;
   <button id="bPlan">PLAN FASTEST ROUTE</button>
   <button id="bCont">CONTINUE DELIVERIES</button>
   <button class="warn" id="bBack">RETURN TO PHARMACY</button>
+  <button class="ghost" id="bSum">Round summary and mileage</button>
   <button class="ghost" data-go="list">View delivery list</button>
   <button class="ghost" data-go="settings">Settings</button>
 </section>
@@ -63,9 +64,12 @@ h2{margin:6px 0 12px}.next{background:var(--navy);color:#fff;border-radius:16px;
   <p class="note" id="ocrMsg">Hold the phone flat, in good light, filling the frame with the name, address and postcode. The photo is read on your phone and then discarded.</p>
   <div id="form" hidden>
     <label>Name or reference</label><input id="fName" autocomplete="off">
-    <label>Address</label><input id="fAddr" autocomplete="off">
+    <label>Address (start typing for suggestions)</label><input id="fAddr" autocomplete="off"><div id="sugg"></div>
     <label>Postcode</label><input id="fPc" autocomplete="off" autocapitalize="characters">
-    <button class="teal" id="bSave">SAVE &amp; SCAN NEXT</button>
+    <label>Phone (optional)</label><input id="fPhone" inputmode="tel" autocomplete="off">
+    <label>Handling</label><select id="fFlag"><option value="0">Normal</option><option value="1">Urgent</option><option value="2">Fridge item</option><option value="3">Urgent and fridge</option></select>
+    <label>Note (e.g. gate code; no medical details)</label><input id="fNote" autocomplete="off">
+    <button class="teal" id="bSave">CONFIRM &amp; ADD</button>
   </div>
   <button class="ghost" id="bManual">Type a delivery instead</button>
   <button id="bDone">DONE</button>
@@ -82,19 +86,26 @@ h2{margin:6px 0 12px}.next{background:var(--navy);color:#fff;border-radius:16px;
   <button class="ghost" data-go="home">Back</button>
 </section>
 
+<section id="v-sum" hidden>
+  <h2>Round summary</h2><div id="sumBody"></div>
+  <button class="teal" id="bCopy">Copy summary</button><button class="ghost" data-go="home">Back</button>
+</section>
+
 <section id="v-settings" hidden>
   <h2>Settings</h2>
   <label>Pharmacy name and address</label><input id="sAddr">
   <label>Pharmacy postcode</label><input id="sPc" autocapitalize="characters">
   <button class="teal" id="bCfg">Save pharmacy</button>
+  <button class="ghost" id="bPin"></button>
   <button class="ghost" id="bNav"></button>
   <button class="ghost" id="bEx"></button>
   <button class="warn" id="bWipe">Delete all of today’s deliveries now</button>
-  <p class="note">Deliveries are kept only on this phone and are wiped automatically at the start of each new day. Photos and medication text are never saved. Exact house lookup sends the address text (not the name) to OpenStreetMap’s free Nominatim service; turn it off if that is not allowed, and MediRoute will use the postcode only.</p>
+  <p class="note">Deliveries are kept only on this phone and are wiped automatically at the start of each new day. Photos and medication text are never saved. Exact house lookup sends the address text (not the name) to OpenStreetMap’s free Nominatim service; turn it off if that is not allowed, and MediRoute will use the postcode only. Address suggestions send the text you type to the free Photon service (Komoot) in the same way.</p>
   <button class="ghost" data-go="home">Back</button>
 </section>
 </main>
 <div id="busy" hidden></div>
+<div id="lock" hidden><div><h1>MEDIROUTE</h1><input id="pin" type="password" inputmode="numeric" placeholder="Passcode" autocomplete="off"><button class="teal" id="bUnlock">UNLOCK</button></div></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
 <script src="logic.js"></script>
 <script src="app.js"></script>
