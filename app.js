@@ -125,42 +125,38 @@ function loadTess() {
   });
 }
 // Enlarges, greys and (optionally) black-and-white thresholds the photo so text is crisper.
-// Finds the block of text (the label) in the photo so the reader ignores the rest of the bag.
+// Finds the label: the largest bright, colourless rectangle in the photo (the white sticker).
 function cropBox(bmp) {
   const full = { x: 0, y: 0, w: bmp.width, h: bmp.height };
   const sc = Math.min(1, 700 / Math.max(bmp.width, bmp.height)), w = Math.round(bmp.width * sc), h = Math.round(bmp.height * sc);
   const c = document.createElement('canvas'); c.width = w; c.height = h;
   const x = c.getContext('2d'); x.drawImage(bmp, 0, 0, w, h);
-  const d = x.getImageData(0, 0, w, h).data, g = new Uint8Array(w * h);
-  for (let i = 0, j = 0; i < d.length; i += 4, j++) g[j] = (d[i] * .3 + d[i + 1] * .59 + d[i + 2] * .11) | 0;
-  const I = new Float64Array((w + 1) * (h + 1)), r = 6, C = 12, cw = Math.ceil(w / C), ch = Math.ceil(h / C), cell = new Float32Array(cw * ch);
-  for (let y = 0; y < h; y++) { let row = 0; for (let u = 0; u < w; u++) { row += g[y * w + u]; I[(y + 1) * (w + 1) + u + 1] = I[y * (w + 1) + u + 1] + row; } }
-  for (let y = 0; y < h; y++) for (let u = 0; u < w; u++) {
-    const x0 = Math.max(0, u - r), x1 = Math.min(w - 1, u + r), y0 = Math.max(0, y - r), y1 = Math.min(h - 1, y + r);
-    const n = (x1 - x0 + 1) * (y1 - y0 + 1), sm = I[(y1 + 1) * (w + 1) + x1 + 1] - I[y0 * (w + 1) + x1 + 1] - I[(y1 + 1) * (w + 1) + x0] + I[y0 * (w + 1) + x0];
-    if (g[y * w + u] * n < sm * 0.85) cell[((y / C) | 0) * cw + ((u / C) | 0)] += 1 / (C * C);
-  }
-  const on = cell.map(v => v > 0.06 && v < 0.6 ? 1 : 0), lab = new Int32Array(cw * ch).fill(-1);
+  const d = x.getImageData(0, 0, w, h).data, mn = new Uint8Array(w * h), sat = new Uint8Array(w * h), hist = new Array(256).fill(0);
+  for (let i = 0, j = 0; i < d.length; i += 4, j++) { const lo = Math.min(d[i], d[i + 1], d[i + 2]), hi = Math.max(d[i], d[i + 1], d[i + 2]); mn[j] = lo; sat[j] = hi - lo; hist[lo]++; }
+  let acc = 0, p95 = 255;
+  for (let t = 255; t >= 0; t--) { acc += hist[t]; if (acc >= w * h * 0.05) { p95 = t; break; } }
+  const C = 12, cw = Math.ceil(w / C), ch = Math.ceil(h / C), cell = new Float32Array(cw * ch);
+  for (let y = 0; y < h; y++) for (let u = 0; u < w; u++) { const j = y * w + u; if (mn[j] > 0.82 * p95 && sat[j] < 35) cell[((y / C) | 0) * cw + ((u / C) | 0)] += 1 / (C * C); }
+  const on = cell.map(v => v > 0.35 ? 1 : 0), lab = new Uint8Array(cw * ch);
   let bestN = 0, bb = null;
   for (let s0 = 0; s0 < on.length; s0++) {
-    if (!on[s0] || lab[s0] >= 0) continue;
-    const st = [s0]; lab[s0] = s0; let n = 0, x0 = cw, x1 = 0, y0 = ch, y1 = 0;
+    if (!on[s0] || lab[s0]) continue;
+    const st = [s0]; lab[s0] = 1; let n = 0, x0 = cw, x1 = 0, y0 = ch, y1 = 0;
     while (st.length) {
       const q = st.pop(), qx = q % cw, qy = (q / cw) | 0; n++;
       x0 = Math.min(x0, qx); x1 = Math.max(x1, qx); y0 = Math.min(y0, qy); y1 = Math.max(y1, qy);
-      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
         const nx = qx + dx, ny = qy + dy; if (nx < 0 || ny < 0 || nx >= cw || ny >= ch) continue;
-        const p = ny * cw + nx; if (on[p] && lab[p] < 0) { lab[p] = s0; st.push(p); }
+        const p = ny * cw + nx; if (on[p] && !lab[p]) { lab[p] = 1; st.push(p); }
       }
     }
     if (n > bestN) { bestN = n; bb = [x0, y0, x1, y1]; }
   }
-  if (!bb || bestN < 8) return full;
-  const m = 2, X0 = Math.max(0, bb[0] - m) * C / sc, Y0 = Math.max(0, bb[1] - m) * C / sc;
-  const X1 = Math.min(bmp.width, (bb[2] + 1 + m) * C / sc), Y1 = Math.min(bmp.height, (bb[3] + 1 + m) * C / sc);
-  const box = { x: X0, y: Y0, w: X1 - X0, h: Y1 - Y0 };
-  const share = box.w * box.h / (bmp.width * bmp.height);
-  return share < 0.08 || share > 0.95 ? full : box;
+  if (!bb) return full;
+  const X0 = Math.max(0, bb[0] - 1) * C / sc, Y0 = Math.max(0, bb[1] - 1) * C / sc;
+  const X1 = Math.min(bmp.width, (bb[2] + 2) * C / sc), Y1 = Math.min(bmp.height, (bb[3] + 2) * C / sc);
+  const box = { x: X0, y: Y0, w: X1 - X0, h: Y1 - Y0 }, share = box.w * box.h / (bmp.width * bmp.height);
+  return share < 0.03 || share > 0.95 ? full : box;
 }
 // Crops, enlarges, greys and cleans the photo (adapt = shadow-proof, otsu = plain black and white), with optional rotation.
 async function prep(file, mode, rot = 0, cr = 1) {
@@ -205,23 +201,24 @@ $('#cam').onchange = async e => {
     await loadTess();
     const wk = await Tesseract.createWorker('eng');
     await wk.setParameters({ tessedit_pageseg_mode: '6' });
-    let p = { name: '', addr: '', pc: '' }, best = -1;
-    const tries = [[1, 'adapt', 0], [1, 'otsu', 0], [0, 'adapt', 0], [1, 'adapt', 90], [1, 'adapt', 270]]; // [crop to label, clean-up, rotation]
-    for (const [cr, mode, rot] of tries) {
-      if (best >= 10 && rot) break;
-      const t = parseSticker((await wk.recognize(await prep(f, mode, rot, cr))).data.text, cfg.pc);
-      const sc = (t.pc ? 10 : 0) + (t.phone ? 2 : 0) + (t.name ? 1 : 0) + (t.addr ? 2 : 0);
-      if (sc > best) { best = sc; p = t; }
-      if (t.pc && t.name && t.addr) break;
+    // Several readings (label cropped, different clean-ups; single-column reading suits this sticker). Majority vote per field.
+    const tries = [[1, 'grey', 0, 4], [1, 'otsu', 0, 4], [1, 'adapt', 0, 4], [0, 'otsu', 0, 4], [1, 'otsu', 0, 6], [1, 'otsu', 90, 4], [1, 'otsu', 270, 4]]; // [crop, clean-up, rotation, reading mode]
+    const rs = [];
+    for (const [cr, mode, rot, psm] of tries) {
+      if (rot && rs.some(r => r.pc)) break;
+      await wk.setParameters({ tessedit_pageseg_mode: String(psm) });
+      rs.push(parseSticker((await wk.recognize(await prep(f, mode, rot, cr))).data.text, cfg.pc));
+      if (rs.length >= 2 && consensus(rs).strong) break;
     }
     await wk.terminate();
+    const p = consensus(rs);
     let note = '';
     if (p.pc) { const f2 = await repairPc(p.pc); if (f2 !== p.pc) { p.pc = f2; note = ' The postcode was corrected using the official list, so please check it.'; } }
-    fillForm(p.name, p.addr, p.pc, p.phone);
+    fillForm(p.name, p.addr, p.pc, p.phone, p.note);
     $('#ocrMsg').textContent = p.pc ? 'Is this right? Tap CONFIRM & ADD, or tap any box to amend it first.' + note : 'No postcode found. Type it in below, or retake the photo.';
   } catch (err) { fail(err); } finally { busy(0); }
 };
-function fillForm(n, a, p, ph = '') { $('#form').hidden = false; $('#fName').value = n; $('#fAddr').value = a; $('#fPc').value = p; $('#fFlag').value = '0'; $('#fNote').value = ''; $('#fPhone').value = ph; picked = null; $('#sugg').innerHTML = ''; }
+function fillForm(n, a, p, ph = '', nt = '') { $('#form').hidden = false; $('#fName').value = n; $('#fAddr').value = a; $('#fPc').value = p; $('#fFlag').value = '0'; $('#fNote').value = nt; $('#fPhone').value = ph; picked = null; $('#sugg').innerHTML = ''; }
 $('#bManual').onclick = () => fillForm('', '', '');
 $('#bSave').onclick = async () => {
   const pc = $('#fPc').value.trim().toUpperCase(), name = $('#fName').value.trim() || 'Delivery', addr = $('#fAddr').value.trim();
