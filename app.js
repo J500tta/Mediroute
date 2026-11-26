@@ -1,9 +1,13 @@
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const today = () => new Date().toISOString().slice(0, 10);
-const navUrl = (to, from) => cfg.nav === 'apple'
-  ? `https://maps.apple.com/?${from ? `saddr=${from.lat},${from.lng}&` : ''}daddr=${to.lat},${to.lng}&dirflg=d`
-  : `waze://?ll=${to.lat},${to.lng}&navigate=yes`;
+// Opens Waze / Apple Maps. If the exact house was found (ex) it uses the coordinates; otherwise it sends the FULL ADDRESS so
+// the map app finds the house itself instead of the postcode centre.
+const navUrl = (to, from) => {
+  const text = to.text || [to.addr, to.pc].filter(Boolean).join(', '), useText = to.ex !== true && !!text;
+  if (cfg.nav === 'apple') return `https://maps.apple.com/?${from ? `saddr=${from.lat},${from.lng}&` : ''}daddr=${useText ? encodeURIComponent(text) : to.lat + ',' + to.lng}&dirflg=d`;
+  return useText ? `waze://?q=${encodeURIComponent(text)}&navigate=yes` : `waze://?ll=${to.lat},${to.lng}&navigate=yes`;
+};
 const OSRM = 'https://router.project-osrm.org';
 
 // ---- Storage (this phone only). Deliveries are wiped each new day. ----
@@ -18,7 +22,7 @@ const save = () => {
 };
 
 // ---- Helpers ----
-let addMode = false, scanned = 0;
+let addMode = false, scanned = 0, queue = [];
 const busy = m => { const b = $('#busy'); b.hidden = !m; b.textContent = m || ''; };
 const show = v => {
   document.querySelectorAll('main>section').forEach(s => s.hidden = s.id !== 'v-' + v);
@@ -39,10 +43,15 @@ async function geoPc(pc) {
 const distM = (a, b) => { const r = x => x * Math.PI / 180, h = Math.sin(r(b.lat - a.lat) / 2) ** 2 + Math.cos(r(a.lat)) * Math.cos(r(b.lat)) * Math.sin(r(b.lng - a.lng) / 2) ** 2; return 12742000 * Math.asin(Math.sqrt(h)); };
 // Finds the exact house on OpenStreetMap (Nominatim). Rejected if it lands >1.5 km from the postcode.
 async function geoExact(addr, pc, c) {
-  for (const q of [addr + ', ' + pc, addr + ', Loughborough, UK']) {
+  const first = addr.split(',')[0].trim(), num = (splitAddr(first).num || '').toLowerCase();
+  for (const u of [`street=${encodeURIComponent(first)}&postalcode=${encodeURIComponent(pc)}`, `q=${encodeURIComponent(addr + ', ' + pc)}`]) {
     try {
-      const j = await (await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=gb&q=' + encodeURIComponent(q))).json();
-      if (j[0]) { const p = { lat: +j[0].lat, lng: +j[0].lon }; if (distM(p, c) < 1500) return p; }
+      const j = await (await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=3&addressdetails=1&countrycodes=gb&' + u)).json();
+      for (const r of j) {
+        const p = { lat: +r.lat, lng: +r.lon };
+        if (distM(p, c) > 1500) continue;
+        if (num ? String((r.address || {}).house_number || '').toLowerCase() === num : ['house', 'building', 'detached', 'semidetached_house', 'terrace', 'residential', 'yes'].includes(r.type)) return p; // the house itself, not just the street
+      }
     } catch (e) {}
     await new Promise(r => setTimeout(r, 1100));
   }
@@ -111,7 +120,7 @@ async function backToPharmacy() {
   try {
     await ensurePharm();
     const p = await gps();
-    location.href = navUrl(cfg.ll, p);
+    location.href = navUrl({ ...cfg.ll, ex: false, text: cfg.addr + ', ' + cfg.pc }, p);
   } catch (e) { fail(e); } finally { busy(0); }
 }
 
@@ -202,20 +211,24 @@ $('#cam').onchange = async e => {
     const wk = await Tesseract.createWorker('eng');
     await wk.setParameters({ tessedit_pageseg_mode: '6' });
     // Several readings (label cropped, different clean-ups; single-column reading suits this sticker). Majority vote per field.
-    const tries = [[1, 'grey', 0, 4], [1, 'otsu', 0, 4], [1, 'adapt', 0, 4], [0, 'otsu', 0, 4], [1, 'otsu', 0, 6], [1, 'otsu', 90, 4], [1, 'otsu', 270, 4]]; // [crop, clean-up, rotation, reading mode]
-    const rs = [];
+    const tries = [[1, 'grey', 0, 4], [1, 'otsu', 0, 4], [1, 'adapt', 0, 4], [0, 'otsu', 0, 4], [1, 'otsu', 0, 6], [1, 'otsu', 0, 3], [1, 'otsu', 90, 4], [1, 'otsu', 270, 4]]; // [crop, clean-up, rotation, reading mode]
+    const all = [];
     for (const [cr, mode, rot, psm] of tries) {
-      if (rot && rs.some(r => r.pc)) break;
+      if (rot && all.some(a => a.some(r => r.pc))) break;
       await wk.setParameters({ tessedit_pageseg_mode: String(psm) });
-      rs.push(parseSticker((await wk.recognize(await prep(f, mode, rot, cr))).data.text, cfg.pc));
-      if (rs.length >= 2 && consensus(rs).strong) break;
+      all.push(parseAll((await wk.recognize(await prep(f, mode, rot, cr))).data.text, cfg.pc));
+      const c = consensusAll(all);
+      if (all.length >= 2 && c.length && c.every(b => b.strong)) break;
     }
     await wk.terminate();
-    const p = consensus(rs);
+    const found = consensusAll(all), p = found[0] || { name: '', addr: '', pc: '', phone: '', note: '' };
+    queue = found.slice(1);
     let note = '';
     if (p.pc) { const f2 = await repairPc(p.pc); if (f2 !== p.pc) { p.pc = f2; note = ' The postcode was corrected using the official list, so please check it.'; } }
+    for (const q of queue) if (q.pc) q.pc = await repairPc(q.pc);
     fillForm(p.name, p.addr, p.pc, p.phone, p.note);
-    $('#ocrMsg').textContent = p.pc ? 'Is this right? Tap CONFIRM & ADD, or tap any box to amend it first.' + note : 'No postcode found. Type it in below, or retake the photo.';
+    $('#bSkipS').hidden = !queue.length;
+    $('#ocrMsg').textContent = (found.length > 1 ? found.length + ' stickers found in this photo; showing the first. ' : '') + (p.pc ? 'Is this right? Tap CONFIRM & ADD, or tap any box to amend it first.' + note : 'No postcode found. Type it in below, or retake the photo.');
   } catch (err) { fail(err); } finally { busy(0); }
 };
 function fillForm(n, a, p, ph = '', nt = '') { $('#form').hidden = false; $('#fName').value = n; $('#fAddr').value = a; $('#fPc').value = p; $('#fFlag').value = '0'; $('#fNote').value = nt; $('#fPhone').value = ph; picked = null; $('#sugg').innerHTML = ''; }
@@ -231,7 +244,7 @@ $('#bSave').onclick = async () => {
     if (dup) { // same address: one stop, more bags
       dup.bags = (dup.bags || 1) + 1; dup.urgent = dup.urgent || urgent; dup.cold = dup.cold || cold; if (phone && !dup.phone) dup.phone = phone;
       if (note) dup.note = (dup.note ? dup.note + '; ' : '') + note;
-      scanned++; save(); $('#form').hidden = true; $('#scanCount').textContent = 'Added to an existing stop (' + dup.bags + ' bags).'; return;
+      scanned++; save(); nextInQueue('Added to an existing stop (' + dup.bags + ' bags).'); return;
     }
     const c = await geoPc(pc);
     let ex = null;
@@ -239,13 +252,11 @@ $('#bSave').onclick = async () => {
     else if (addr && cfg.exact !== false) { busy('Finding the house…'); ex = await geoExact(addr, pc, c); }
     const ll = ex || c;
     day.items.push({ id: Date.now() + Math.random().toString(36).slice(2, 6), name, addr, pc, lat: ll.lat, lng: ll.lng, ex: !!ex, key, bags: 1, urgent, cold, note, phone, s: 'todo' });
-    scanned++; save();
-    $('#form').hidden = true; $('#scanCount').textContent = scanned + ' added this session. Scan the next bag.';
-    $('#ocrMsg').textContent = 'Saved. Take the next photo.';
+    scanned++; save(); nextInQueue(scanned + ' added this session. Scan the next bag.');
   } catch (e) { fail(e); } finally { busy(0); }
 };
 function openScan(add) {
-  addMode = add; scanned = 0; $('#form').hidden = true; $('#scanCount').textContent = '';
+  addMode = add; scanned = 0; queue = []; $('#bSkipS').hidden = true; $('#form').hidden = true; $('#scanCount').textContent = '';
   $('#ocrMsg').textContent = 'Hold the phone straight above the sticker and fill the frame. The photo is read on your phone and then discarded.';
   show('scan');
 }
@@ -378,7 +389,9 @@ $('#fAddr').addEventListener('input', () => {
     try {
       let l = cfg.ll || { lat: 52.77, lng: -1.2 }; const a = splitAddr(q), pcv = $('#fPc').value.trim();
       if (/^[A-Za-z]{1,2}\d[A-Za-z\d]?\s*\d[A-Za-z]{2}$/.test(pcv)) { try { l = await geoPc(pcv); } catch (e) {} }
-      const get = async t => (await (await fetch(`https://photon.komoot.io/api/?limit=8&lang=en&lat=${l.lat}&lon=${l.lng}&q=${encodeURIComponent(t)}`)).json()).features.filter(f => f.properties.countrycode === 'GB');
+      const R = 40000, dLat = R / 111000, dLng = R / (111000 * Math.cos(l.lat * Math.PI / 180)); // only places within 40 km
+      const at = f => ({ lat: f.geometry.coordinates[1], lng: f.geometry.coordinates[0] });
+      const get = async t => (await (await fetch(`https://photon.komoot.io/api/?limit=15&lang=en&lat=${l.lat}&lon=${l.lng}&bbox=${l.lng - dLng},${l.lat - dLat},${l.lng + dLng},${l.lat + dLat}&q=${encodeURIComponent(t)}`)).json()).features.filter(f => f.properties.countrycode === 'GB' && distM(l, at(f)) <= R);
       const [byNum, byStreet] = await Promise.all([a.num ? get(a.street + ' ' + a.num) : [], get(a.street)]);
       const seen = new Set(); sg = [];
       const add = (f, house) => {
@@ -389,7 +402,7 @@ $('#fAddr').addEventListener('input', () => {
         sg.push({ line, pc: house ? p.postcode || '' : '', lat: f.geometry.coordinates[1], lng: f.geometry.coordinates[0], house });
       };
       byNum.filter(f => (f.properties.housenumber || '').toLowerCase() === a.num.toLowerCase()).forEach(f => add(f, true));
-      byStreet.forEach(f => add(f, false));
+      byStreet.sort((x, y) => distM(l, at(x)) - distM(l, at(y))).forEach(f => add(f, false));
       sg = sg.slice(0, 6);
       const need = sg.filter(s => !s.pc);
       if (need.length) { // fill in the nearest postcode where the map data has none
@@ -408,5 +421,16 @@ $('#sugg').onclick = e => {
   $('#fAddr').value = s.line; if (s.pc && (!$('#fPc').value.trim() || s.house || s.guess)) $('#fPc').value = s.pc.toUpperCase();
   picked = { addr: s.line, lat: s.lat, lng: s.lng, house: s.house }; $('#sugg').innerHTML = '';
 };
+// After a save: show the next sticker found in the same photo, or finish.
+function nextInQueue(msg) {
+  $('#scanCount').textContent = msg;
+  if (queue.length) {
+    const n = queue.shift();
+    fillForm(n.name, n.addr, n.pc, n.phone, n.note);
+    $('#bSkipS').hidden = false;
+    $('#ocrMsg').textContent = 'Next sticker from the same photo (' + queue.length + ' more after this). Confirm, amend or skip it.';
+  } else { $('#form').hidden = true; $('#bSkipS').hidden = true; $('#ocrMsg').textContent = 'Saved. Take the next photo.'; }
+}
+$('#bSkipS').onclick = () => nextInQueue('Skipped one sticker.');
 render(); show('home');
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});

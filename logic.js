@@ -139,6 +139,27 @@ function optimise(D, n, closed, ret) {
   }
   return r;
 }
+// A photo can hold several stickers (a stack or roll). Each one ends with the pharmacy footer, so split there.
+function splitStickers(text, ownPc) {
+  const lines = text.split('\n'), own = (ownPc || '').replace(/\s/g, '').toUpperCase();
+  const keep = l => /keep\s*out\s*of\s*reach/i.test(l), useKeep = lines.some(keep);
+  const isEnd = l => useKeep ? keep(l) : !!own && l.toUpperCase().replace(/\s/g, '').includes(own);
+  const blocks = []; let cur = [];
+  lines.forEach(l => { cur.push(l); if (isEnd(l)) { blocks.push(cur); cur = []; } });
+  if (cur.some(l => l.trim())) blocks.push(cur);
+  return blocks;
+}
+function parseAll(text, ownPc) {
+  const rs = splitStickers(text, ownPc).map(b => parseSticker(b.join('\n'), ownPc)).filter(r => r.pc);
+  return rs.length ? rs : [parseSticker(text, ownPc)];
+}
+// Several readings (each a list of stickers) -> vote on how many stickers there are, then per field.
+function consensusAll(all) {
+  const counts = new Map(); all.forEach(a => counts.set(a.length, (counts.get(a.length) || 0) + 1));
+  let nb = 0, best = 0; counts.forEach((n, k) => { if (k && n > best) { best = n; nb = k; } });
+  const same = all.filter(a => a.length === nb);
+  return Array.from({ length: nb }, (_, k) => consensus(same.map(a => a[k])));
+}
 function splitAddr(q) {
   let pre = '', s = q.trim();
   const f = s.match(/^((?:flat|apartment|apt|unit)\s+\w+,?\s*)/i);
@@ -149,4 +170,4 @@ function splitAddr(q) {
   if (m) return { pre, num: m[2], street: m[1] };
   return { pre, num: '', street: s };
 }
-if (typeof module !== 'undefined') module.exports = { parseSticker, optimise, fixPostcode, splitAddr, consensus };
+if (typeof module !== 'undefined') module.exports = { parseSticker, optimise, fixPostcode, splitAddr, consensus, parseAll, consensusAll, splitStickers };
